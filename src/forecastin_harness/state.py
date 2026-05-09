@@ -4,6 +4,7 @@ State lives at ``<target_repo>/<config.state.dir>`` (default ``.harness/state``)
 Layout::
 
     .harness/state/
+        .lock                   sentinel file used for cross-platform exclusion
         lanes.json              registry of lane records
         events.jsonl            append-only audit log of harness events
         gates/                  one subtree per gate run (state.json + log)
@@ -12,6 +13,12 @@ Layout::
 
 All state is plain JSON / JSONL so it's auditable, diffable, and recoverable
 by hand.
+
+Concurrency: writes that read-modify-write the lane registry, and appends
+to the JSONL audit log, are serialised across threads and processes via a
+filesystem advisory lock on ``<root>/.lock`` (``fcntl.flock`` on POSIX,
+``msvcrt.locking`` on Windows). The lock is stdlib-only and best-effort —
+sufficient to prevent the duplicate-lane race observed in v0.2.
 """
 
 from __future__ import annotations
@@ -19,6 +26,7 @@ from __future__ import annotations
 import datetime as _dt
 import json
 import os
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Iterable, Iterator, Literal
@@ -71,8 +79,10 @@ class StateError(RuntimeError):
 class StateStore:
     """Filesystem-backed registry. Cheap to construct; idempotent layout creation.
 
-    The store does not lock. Concurrent operators are expected to use distinct
-    lane names; the audit log makes a collision visible in postmortems.
+    Mutating operations (``add_lane``, ``upsert_lane``, ``save_lanes``,
+    ``append_event``) acquire a cross-platform advisory lock on
+    ``<root>/.lock`` so concurrent workers cannot lose writes through
+    interleaved read-modify-write cycles.
     """
 
     def __init__(self, root: Path) -> None:
@@ -99,14 +109,78 @@ class StateStore:
     def tasks_dir(self) -> Path:
         return self.root / "tasks"
 
+    @property
+    def lock_path(self) -> Path:
+        return self.root / ".lock"
+
     def ensure_layout(self) -> None:
         self.root.mkdir(parents=True, exist_ok=True)
         for sub in (self.gates_dir, self.pr_dir, self.tasks_dir):
             sub.mkdir(parents=True, exist_ok=True)
+        # Sentinel lock file. Touch is enough — content is never read.
+        if not self.lock_path.exists():
+            self.lock_path.touch()
         if not self.lanes_path.exists():
-            self._write_json(self.lanes_path, {"lanes": []})
+            StateStore.atomic_write_json(self.lanes_path, {"lanes": []})
         if not self.events_path.exists():
             self.events_path.touch()
+
+    # ---------- locking ----------
+    @contextmanager
+    def _lock(self) -> Iterator[None]:
+        """Acquire an exclusive advisory lock on ``<root>/.lock``.
+
+        Cross-platform via stdlib only. The lock is released even if the
+        guarded block raises. Reentrant acquisition from the same thread is
+        not supported — callers must not nest ``with self._lock():`` blocks.
+        """
+        # Lock file must exist before we can open it for locking.
+        self.lock_path.parent.mkdir(parents=True, exist_ok=True)
+        if not self.lock_path.exists():
+            self.lock_path.touch()
+
+        fd = os.open(str(self.lock_path), os.O_RDWR | os.O_CREAT)
+        try:
+            if getattr(os, "name") == "nt":
+                import msvcrt  # type: ignore[import-not-found]
+                import time as _time
+
+                # ``msvcrt.locking(fd, LK_LOCK, ...)`` only retries ~10 times
+                # at one-second intervals before raising. Under heavy contention
+                # (many threads/processes), that ceiling is too tight, so we
+                # implement a longer non-blocking retry loop ourselves.
+                deadline = _time.monotonic() + 60.0
+                while True:
+                    try:
+                        msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+                        break
+                    except OSError:
+                        if _time.monotonic() >= deadline:
+                            raise
+                        _time.sleep(0.01)
+                try:
+                    yield
+                finally:
+                    # Seek back to 0 before unlocking the same byte range.
+                    try:
+                        os.lseek(fd, 0, os.SEEK_SET)
+                        msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+                    except OSError:
+                        # Best-effort unlock; descriptor close also releases.
+                        pass
+            else:
+                import fcntl  # type: ignore[import-not-found]
+
+                fcntl.flock(fd, fcntl.LOCK_EX)
+                try:
+                    yield
+                finally:
+                    try:
+                        fcntl.flock(fd, fcntl.LOCK_UN)
+                    except OSError:
+                        pass
+        finally:
+            os.close(fd)
 
     # ---------- lanes ----------
     def load_lanes(self) -> list[Lane]:
@@ -118,10 +192,13 @@ class StateStore:
         return [Lane.from_dict(item) for item in data["lanes"]]
 
     def save_lanes(self, lanes: Iterable[Lane]) -> None:
-        self._write_json(
-            self.lanes_path,
-            {"lanes": [lane.to_dict() for lane in lanes]},
-        )
+        # Materialise once so we can safely iterate inside the lock.
+        materialised = list(lanes)
+        with self._lock():
+            StateStore.atomic_write_json(
+                self.lanes_path,
+                {"lanes": [lane.to_dict() for lane in materialised]},
+            )
 
     def find_lane(self, name: str) -> Lane | None:
         for lane in self.load_lanes():
@@ -130,23 +207,34 @@ class StateStore:
         return None
 
     def upsert_lane(self, lane: Lane) -> None:
-        lanes = self.load_lanes()
-        replaced = False
-        for i, existing in enumerate(lanes):
-            if existing.name == lane.name:
-                lanes[i] = lane
-                replaced = True
-                break
-        if not replaced:
-            lanes.append(lane)
-        self.save_lanes(lanes)
+        with self._lock():
+            lanes = self.load_lanes()
+            replaced = False
+            for i, existing in enumerate(lanes):
+                if existing.name == lane.name:
+                    lanes[i] = lane
+                    replaced = True
+                    break
+            if not replaced:
+                lanes.append(lane)
+            StateStore.atomic_write_json(
+                self.lanes_path,
+                {"lanes": [item.to_dict() for item in lanes]},
+            )
 
     def add_lane(self, lane: Lane) -> None:
-        if self.find_lane(lane.name) is not None:
-            raise StateError(f"lane already exists: {lane.name}")
-        lanes = self.load_lanes()
-        lanes.append(lane)
-        self.save_lanes(lanes)
+        with self._lock():
+            # Read-modify-write entirely inside the lock so duplicate-name
+            # checks cannot race against a concurrent insert.
+            lanes = self.load_lanes()
+            for existing in lanes:
+                if existing.name == lane.name:
+                    raise StateError(f"lane already exists: {lane.name}")
+            lanes.append(lane)
+            StateStore.atomic_write_json(
+                self.lanes_path,
+                {"lanes": [item.to_dict() for item in lanes]},
+            )
 
     # ---------- events ----------
     def append_event(self, event: dict[str, Any]) -> None:
@@ -159,8 +247,9 @@ class StateStore:
         line = json.dumps(record, sort_keys=True, ensure_ascii=False)
         # ensure_layout is cheap if directories already exist
         self.events_path.parent.mkdir(parents=True, exist_ok=True)
-        with self.events_path.open("a", encoding="utf-8") as f:
-            f.write(line + "\n")
+        with self._lock():
+            with self.events_path.open("a", encoding="utf-8") as f:
+                f.write(line + "\n")
 
     def iter_events(self) -> Iterator[dict[str, Any]]:
         if not self.events_path.exists():
@@ -173,10 +262,15 @@ class StateStore:
         return json.loads(path.read_text(encoding="utf-8"))
 
     @staticmethod
-    def _write_json(path: Path, payload: Any) -> None:
+    def atomic_write_json(path: Path, payload: Any) -> None:
+        """Write ``payload`` as JSON to ``path`` atomically.
+
+        Uses a sibling ``.tmp`` file plus :func:`os.replace`, so a crash
+        mid-write never leaves the destination half-written. Parent
+        directories are created if missing. Public so other modules
+        (notably ``gates.write_state``) can adopt the same atomicity.
+        """
         path.parent.mkdir(parents=True, exist_ok=True)
-        # Atomic-ish write: temp file + replace, so a crash mid-write doesn't
-        # corrupt an existing registry.
         tmp = path.with_suffix(path.suffix + ".tmp")
         tmp.write_text(
             json.dumps(payload, indent=2, sort_keys=True, ensure_ascii=False) + "\n",
