@@ -307,3 +307,49 @@ def test_pr_merge_execute_alone_refuses(
     assert "operator-confirmed" in err
 
 
+# ---------------- init mismatch ----------------
+
+
+def test_init_rejects_target_repo_config_path_mismatch(
+    tmp_path: Path,
+    example_config_file: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """init must exit 2 when --target-repo != config.target.path (after .resolve)."""
+    # Create a *different* directory that also looks like a git checkout.
+    other_target = tmp_path / "other-target"
+    other_target.mkdir()
+    (other_target / ".git").mkdir()
+
+    rc = cli.main(
+        [
+            "init",
+            "--target-repo",
+            str(other_target),
+            "--config",
+            str(example_config_file),
+        ]
+    )
+    assert rc == 2
+    err = capsys.readouterr().err
+    # Both paths must appear in the error so the operator can fix the mismatch.
+    assert str(other_target.resolve()) in err
+    assert "config.target.path" in err
+
+
+def test_init_accepts_matching_paths(
+    fake_target_repo: Path,
+    example_config_file: Path,
+) -> None:
+    """init returns 0 and creates the state dir when paths match."""
+    rc = cli.main(
+        [
+            "init",
+            "--target-repo",
+            str(fake_target_repo),
+            "--config",
+            str(example_config_file),
+        ]
+    )
+    assert rc == 0
+    assert _state_dir(fake_target_repo).is_dir()

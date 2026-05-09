@@ -211,6 +211,18 @@ def cmd_init(args: argparse.Namespace) -> int:
         print(f"config error: {exc}", file=sys.stderr)
         return 2
     target = Path(args.target_repo).resolve()
+    config_target = Path(config.target.path).resolve()
+    if target != config_target:
+        # Compare after .resolve() so symlinks and case-only differences
+        # (Windows) collapse to the same canonical path before mismatch errors.
+        print(
+            "target repo path does not match config.target.path:\n"
+            f"  --target-repo:      {target}\n"
+            f"  config.target.path: {config_target}\n"
+            "Update one so they agree before re-running init.",
+            file=sys.stderr,
+        )
+        return 2
     if not target.is_dir():
         print(f"target repo path does not exist: {target}", file=sys.stderr)
         return 2
