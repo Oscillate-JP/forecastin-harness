@@ -103,6 +103,32 @@ def plan_lane(
     )
 
 
+class LaneApplyError(RuntimeError):
+    """Raised when ``apply_plan`` fails after the lane was recorded.
+
+    The lane is still in the registry (status ``blocked``); the operator
+    can inspect it via :func:`recover_orphans` and clean up the orphan
+    worktree on disk if any.
+    """
+
+
+def _truncate(text: str, limit: int = 400) -> str:
+    text = text.strip()
+    if len(text) <= limit:
+        return text
+    return text[: limit - 1] + "…"
+
+
+def _failure_reason(exc: BaseException) -> str:
+    """Build a stable, length-bounded failure reason for the lane notes."""
+    stderr = getattr(exc, "stderr", None)
+    if isinstance(stderr, bytes):
+        stderr = stderr.decode("utf-8", errors="replace")
+    if isinstance(stderr, str) and stderr.strip():
+        return _truncate(f"{type(exc).__name__}: {stderr}")
+    return _truncate(f"{type(exc).__name__}: {exc}")
+
+
 def apply_plan(
     plan: LanePlan,
     store: StateStore,
@@ -110,61 +136,129 @@ def apply_plan(
     owner: str | None = None,
     runner=subprocess.run,
 ) -> Lane:
-    """Materialise the worktree and register the lane.
+    """Materialise the worktree and register the lane transactionally.
 
-    Raises :class:`StateError` if a lane with the same name already exists,
-    *before* executing any git command.
+    Lifecycle:
+
+    1. Reject duplicates (``StateError``) before any side effect.
+    2. Write a ``planned`` lane record to state *before* invoking git, so a
+       crash mid-flight always leaves a discoverable record (no orphan
+       worktrees the registry doesn't know about).
+    3. Run the planned git commands + rev-parse for SHAs. On success, update
+       the lane in place with the resolved ``base_sha`` / ``head_sha`` and
+       emit ``lane.created``.
+    4. On any failure during git execution, mark the lane ``blocked``,
+       capture the reason in ``notes``, emit ``lane.blocked``, and re-raise.
     """
     if store.find_lane(plan.name) is not None:
         raise StateError(f"lane already exists: {plan.name}")
 
-    base_sha = ""
-    head_sha = ""
-    for cmd in plan.commands:
-        result = runner(list(cmd), check=True, capture_output=True, text=True)
-        # We deliberately do not parse fetch output; SHAs are read after.
-        _ = result
-
-    rev_parse_base = runner(
-        ["git", "-C", str(plan.worktree_path), "rev-parse", plan.base_branch],
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-    base_sha = rev_parse_base.stdout.strip()
-    rev_parse_head = runner(
-        ["git", "-C", str(plan.worktree_path), "rev-parse", "HEAD"],
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-    head_sha = rev_parse_head.stdout.strip()
-
+    now = utcnow_iso()
     lane = Lane(
         name=plan.name,
         task_id=plan.task_id,
         scope=plan.scope,
         branch=plan.branch,
-        base_sha=base_sha,
-        head_sha=head_sha,
+        base_sha="",
+        head_sha="",
         worktree=str(plan.worktree_path),
         status="planned",
         owner=owner,
-        created_at=utcnow_iso(),
+        created_at=now,
+        updated_at=now,
+    )
+    # Step 1 (state-first): record the intent before any disk mutation.
+    store.add_lane(lane)
+
+    try:
+        for cmd in plan.commands:
+            result = runner(list(cmd), check=True, capture_output=True, text=True)
+            # Fetch + worktree-add output is not parsed; SHAs come from rev-parse.
+            _ = result
+
+        rev_parse_base = runner(
+            ["git", "-C", str(plan.worktree_path), "rev-parse", plan.base_branch],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        base_sha = rev_parse_base.stdout.strip()
+        rev_parse_head = runner(
+            ["git", "-C", str(plan.worktree_path), "rev-parse", "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        head_sha = rev_parse_head.stdout.strip()
+    except BaseException as exc:
+        reason = _failure_reason(exc)
+        blocked = Lane(
+            name=lane.name,
+            task_id=lane.task_id,
+            scope=lane.scope,
+            branch=lane.branch,
+            base_sha="",
+            head_sha="",
+            worktree=lane.worktree,
+            status="blocked",
+            owner=lane.owner,
+            created_at=lane.created_at,
+            updated_at=utcnow_iso(),
+            notes=reason,
+        )
+        store.upsert_lane(blocked)
+        store.append_event(
+            {
+                "kind": "lane.blocked",
+                "lane": blocked.name,
+                "branch": blocked.branch,
+                "worktree": blocked.worktree,
+                "reason": reason,
+            }
+        )
+        raise
+
+    updated = Lane(
+        name=lane.name,
+        task_id=lane.task_id,
+        scope=lane.scope,
+        branch=lane.branch,
+        base_sha=base_sha,
+        head_sha=head_sha,
+        worktree=lane.worktree,
+        status="planned",
+        owner=lane.owner,
+        created_at=lane.created_at,
         updated_at=utcnow_iso(),
     )
-    store.add_lane(lane)
+    store.upsert_lane(updated)
     store.append_event(
         {
             "kind": "lane.created",
-            "lane": lane.name,
-            "branch": lane.branch,
+            "lane": updated.name,
+            "branch": updated.branch,
             "base_sha": base_sha,
             "head_sha": head_sha,
-            "worktree": lane.worktree,
+            "worktree": updated.worktree,
         }
     )
-    return lane
+    return updated
+
+
+def recover_orphans(store: StateStore) -> list[Lane]:
+    """Return lanes left in ``blocked`` state with a recorded worktree path.
+
+    These are lanes whose registry record exists but whose git worktree
+    creation (or post-create rev-parse) failed. The operator inspects the
+    list, decides whether to remove the orphan worktree on disk, and then
+    either retries the lane (after `retire_lane` clears the record) or
+    leaves it blocked for forensic purposes.
+    """
+    return [
+        lane
+        for lane in store.load_lanes()
+        if lane.status == "blocked" and lane.worktree
+    ]
 
 
 def plan_retire(store: StateStore, name: str) -> Lane:

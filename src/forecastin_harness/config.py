@@ -88,6 +88,7 @@ class HarnessConfig:
     health: HealthSpec = field(default_factory=HealthSpec)
     merge: MergeSpec = field(default_factory=MergeSpec)
     state: StateSpec = field(default_factory=StateSpec)
+    warnings: tuple[str, ...] = ()
 
     @property
     def state_path(self) -> Path:
@@ -126,6 +127,21 @@ def parse_config(raw: Mapping[str, Any]) -> HarnessConfig:
     merge = _parse_merge(raw.get("merge"))
     state = _parse_state(raw.get("state"))
 
+    warnings: list[str] = []
+    # Containment check: a worktree root that lives outside the target repo
+    # path is legal (some operators want lanes on a separate disk) but
+    # surprising — surface it as a warning so the operator confirms intent.
+    try:
+        worktrees.root.resolve().relative_to(target.path.resolve())
+        contained = True
+    except ValueError:
+        contained = False
+    if not contained:
+        warnings.append(
+            f"worktrees.root ({worktrees.root}) is not contained in "
+            f"target.path ({target.path}); lanes will live outside the target repo tree"
+        )
+
     return HarnessConfig(
         target=target,
         worktrees=worktrees,
@@ -134,6 +150,7 @@ def parse_config(raw: Mapping[str, Any]) -> HarnessConfig:
         health=health,
         merge=merge,
         state=state,
+        warnings=tuple(warnings),
     )
 
 
@@ -154,6 +171,8 @@ def _parse_target(value: Any) -> TargetSpec:
         raise ConfigError("target.repo must be a string '<owner>/<name>'")
     if not isinstance(path, str) or not path:
         raise ConfigError("target.path must be a non-empty string")
+    if not Path(path).is_absolute():
+        raise ConfigError(f"target.path must be absolute, got {path!r}")
     if not isinstance(main_branch, str) or not main_branch:
         raise ConfigError("target.main_branch must be a non-empty string")
     return TargetSpec(repo=repo, path=Path(path), main_branch=main_branch)
@@ -164,6 +183,8 @@ def _parse_worktrees(value: Any) -> WorktreeSpec:
     root = section.get("root")
     if not isinstance(root, str) or not root:
         raise ConfigError("worktrees.root must be a non-empty string")
+    if not Path(root).is_absolute():
+        raise ConfigError(f"worktrees.root must be absolute, got {root!r}")
     return WorktreeSpec(root=Path(root))
 
 
@@ -232,6 +253,12 @@ def _parse_state(value: Any) -> StateSpec:
     dir_val = value.get("dir", ".harness/state")
     if not isinstance(dir_val, str) or not dir_val:
         raise ConfigError("state.dir must be a non-empty string")
+    # state.dir is resolved against target.path, so an absolute path here
+    # would silently override the target-scoped layout. Reject it loudly.
+    if Path(dir_val).is_absolute():
+        raise ConfigError(
+            f"state.dir must be relative (resolved against target.path), got {dir_val!r}"
+        )
     return StateSpec(dir=dir_val)
 
 
