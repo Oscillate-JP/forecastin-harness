@@ -69,12 +69,14 @@ def test_load_packet_missing_file(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize("agent", SUPPORTED_AGENTS)
-def test_render_prompt_for_each_agent(agent: str, repo_root: Path, tmp_path: Path) -> None:
+def test_render_prompt_for_each_agent(
+    agent: str, packaged_templates_dir: Path, tmp_path: Path
+) -> None:
     raw = _valid_packet_dict()
     yaml_path = tmp_path / "packet.yaml"
     yaml_path.write_text(yaml.safe_dump(raw), encoding="utf-8")
     packet = load_packet(yaml_path)
-    text = render_prompt(packet, agent, templates_dir=repo_root / "templates")
+    text = render_prompt(packet, agent, templates_dir=packaged_templates_dir)
     # Substitutions must be applied — no $identifier should leak through.
     assert "$mission" not in text
     assert "$files_allowed" not in text
@@ -85,15 +87,15 @@ def test_render_prompt_for_each_agent(agent: str, repo_root: Path, tmp_path: Pat
     assert raw["mission"].splitlines()[0] in text
 
 
-def test_render_prompt_rejects_unknown_agent(repo_root: Path) -> None:
+def test_render_prompt_rejects_unknown_agent(packaged_templates_dir: Path) -> None:
     packet = parse_packet(_valid_packet_dict())
     with pytest.raises(ValueError, match="unsupported agent"):
-        render_prompt(packet, "wishful", templates_dir=repo_root / "templates")
+        render_prompt(packet, "wishful", templates_dir=packaged_templates_dir)
 
 
-def test_shipped_template_packet_validates(repo_root: Path) -> None:
+def test_shipped_template_packet_validates(packaged_templates_dir: Path) -> None:
     """The example packet shipped in templates/ must itself be valid."""
-    packet = load_packet(repo_root / "templates" / "task_packet.yaml")
+    packet = load_packet(packaged_templates_dir / "task_packet.yaml")
     assert packet.mission
     assert packet.scope
     assert packet.files_allowed

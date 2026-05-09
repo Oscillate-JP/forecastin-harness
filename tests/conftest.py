@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+from importlib import resources
 from pathlib import Path
 
 import pytest
 import yaml
 
 from forecastin_harness.config import HarnessConfig, parse_config
+from forecastin_harness.prompts import TEMPLATES_PACKAGE
 
 
 def _example_config_payload(target_path: Path) -> dict:
@@ -59,5 +61,23 @@ def example_config_file(tmp_path: Path, fake_target_repo: Path) -> Path:
 
 @pytest.fixture
 def repo_root() -> Path:
-    """Repository root, used to locate the shipped templates directory."""
+    """Repository root.
+
+    Note: the shipped templates moved into the wheel under
+    ``src/forecastin_harness/templates/`` in v0.3, so this fixture no longer
+    points at a location that contains them. Tests that need the template
+    directory should depend on :func:`packaged_templates_dir` instead.
+    """
     return Path(__file__).resolve().parents[1]
+
+
+@pytest.fixture
+def packaged_templates_dir() -> Path:
+    """Filesystem path to the in-package ``templates`` directory.
+
+    Resolved via :mod:`importlib.resources` so this works whether the suite
+    is run against an editable install or against a built wheel.
+    """
+    # ``files()`` returns a Traversable; for our package data layout this is
+    # always backed by a real path on disk and Path() works fine.
+    return Path(str(resources.files(TEMPLATES_PACKAGE)))

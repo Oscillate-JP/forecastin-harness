@@ -28,7 +28,7 @@ forecastin-harness = "forecastin_harness.cli:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-forecastin_harness = ["py.typed"]
+forecastin_harness = ["py.typed", "templates/*.md", "templates/*.yaml"]
 
 [tool.pytest.ini_options]
 addopts = "-q -ra"
