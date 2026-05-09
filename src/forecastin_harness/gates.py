@@ -33,7 +33,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 
-from .state import StateStore, utcnow_iso
+from .state import StateStore, utcnow_iso  # StateStore.atomic_write_json adopted below
 
 GateStatus = Literal[
     "planned",
@@ -126,12 +126,13 @@ def plan_gate(store: StateStore, *, name: str, command: str) -> GatePlan:
 
 
 def write_state(plan: GatePlan, state: GateState) -> None:
-    """Persist a gate state, creating parent directories if needed."""
-    plan.state_path.parent.mkdir(parents=True, exist_ok=True)
-    plan.state_path.write_text(
-        json.dumps(state.to_dict(), indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
+    """Persist a gate state atomically, creating parent directories if needed.
+
+    Adopts :meth:`StateStore.atomic_write_json` so that a crash mid-write
+    cannot leave the gate state file truncated or corrupt — the previous
+    contents (or absence) remain visible until the rename succeeds.
+    """
+    StateStore.atomic_write_json(plan.state_path, state.to_dict())
 
 
 def read_state(plan: GatePlan) -> GateState | None:
