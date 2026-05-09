@@ -75,6 +75,58 @@ When you finish a task, reply with:
 4. **CLI smoke** — the `forecastin-harness …` invocations you verified work.
 5. **Blockers** — list, or `NONE`.
 6. **Next action** — one line.
+7. **Remaining risks** — list, or `NONE`.
 
 Do not push branches without an explicit operator instruction. Do not
 amend or rewrite commits authored before this session.
+
+## Controller-lane contract (FOR-220 lessons)
+
+The harness is an **assisted guardrail, not an autonomous control plane**.
+Before any lane runs, its task packet MUST pass:
+
+```
+forecastin-harness controller validate --task-file <path>
+```
+
+The validator rejects packets that:
+
+* mix feature paths and gate-fix paths in `files.allowed`
+  (`mixed_feature_and_gate_fix`);
+* omit `official_gate_command` (`missing_official_gate`);
+* set `merge_authority` to anything other than `"human-only"`
+  (`autonomous_merge_not_allowed`);
+* leave `no_bypass_permissions` unset or false, or smuggle a bypass
+  token (`--no-verify`, `bypass-permissions`, `ignore-hooks`,
+  `skip-hooks`, `--no-gpg-sign`) anywhere in their strings
+  (`bypass_permissions_not_disallowed`, `bypass_token_detected`);
+* omit `max_runtime_minutes` (`missing_max_runtime`);
+* leave `files.forbidden` empty (`missing_forbidden_files`);
+* omit a `final_report` contract that promises *changed files*, *tests*,
+  and *remaining risks* (`missing_final_report_contract` or one of the
+  `final_report_missing_*` codes);
+* declare an unrecognised `lane_type` (`invalid_lane_type`).
+
+You MUST treat the validator's verdict as load-bearing. Do not paper
+over a finding by editing the packet to dodge a substring match — fix
+the underlying intent. If the operator wants a behaviour that the
+validator refuses (e.g. autonomous merge), surface it to the operator;
+do not work around the check.
+
+Before starting work in a fresh shell, also run:
+
+```
+forecastin-harness controller doctor [--config <path>]
+```
+
+`doctor` is read-only. Read its output:
+
+* If it lists **two or more long-running pytest processes**, stop and
+  resolve them before starting a new lane. Concurrent unmanaged pytest
+  runs were a primary FOR-220 failure mode.
+* If `cwd_matches_target` is `False`, you are in the wrong checkout.
+  Either `cd` to the target or change the config; do not run lane
+  commands from a sibling repo.
+* If `dirty` is `True`, decide explicitly whether the existing changes
+  belong to this lane or are someone else's in-progress work. Never
+  silently absorb them.

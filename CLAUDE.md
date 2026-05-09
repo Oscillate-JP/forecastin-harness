@@ -70,6 +70,53 @@ and stop; do not invent a Forecastin-shaped substitute gate.
    pattern `plan_X` (pure) → `apply_X` (writes state, runs subprocesses)
    makes dry-run trivial and tests cheap.
 
+## Controller-lane rules (FOR-220 lessons)
+
+The harness is an **assisted guardrail, not an autonomous control plane**.
+Operators run lanes; the harness refuses to authorise actions that the
+FOR-220 incident showed were dangerous. These rules are mechanically
+enforced by `forecastin-harness controller validate` against every task
+packet before a lane runs.
+
+1. **One lane = one objective.** A task packet declares exactly one
+   `lane_type` (`feature`, `gate-fix`, `review`, or `controller`) and the
+   `files.allowed` list must not mix feature paths (`backend/app/**`,
+   `frontend/src/**`) with gate-repair paths (`scripts/ci.sh`,
+   `scripts/claude/**`, `.github/workflows/**`, `Makefile`,
+   `infrastructure/docker/**`). Feature work and gate repair go into
+   separate PRs.
+2. **Every lane has a wall-clock budget.** `max_runtime_minutes` must be
+   set to a positive integer. There is no "stand by" or "indefinite
+   loop" mode.
+3. **Every lane names the official gate.** `official_gate_command` is
+   the single, named command that decides PASS / FAIL for the lane.
+   Diagnostic pytest enumeration (e.g. `pytest --collect-only`) is
+   **not** the official gate and must not be confused with one.
+4. **Diagnostic commands are explicit.** `diagnostic_commands_allowed`
+   lists what the agent may run for triage. Anything else is
+   out-of-scope.
+5. **Forbidden files are required.** `files.forbidden` must be
+   non-empty so the agent always has at least one tripwire.
+6. **Merge authority is human-only.** `merge_authority: "human-only"`.
+   The harness will plan and render `gh pr merge` commands but never
+   execute them autonomously, even from inside a controller lane.
+7. **No bypass permissions.** `no_bypass_permissions: true`. The
+   validator additionally scans every string in the packet and rejects
+   any occurrence of `--no-verify`, `bypass-permissions`,
+   `ignore-hooks`, `skip-hooks`, or `--no-gpg-sign`.
+8. **Final-report contract.** Every packet declares a `final_report`
+   list whose entries collectively name `changed files`, `tests`, and
+   `remaining risks`. Operators always get the same shape of report.
+9. **Long jobs are managed.** Background shells, orphan pytest
+   processes, and forgotten `gate start` runs are surfaced by
+   `forecastin-harness controller doctor`. Run it before opening a new
+   lane if the host has been doing other work.
+
+The validator is intentionally fail-closed: any missing or wrong field
+yields a non-zero exit and a named code (`mixed_feature_and_gate_fix`,
+`autonomous_merge_not_allowed`, `bypass_token_detected`, ...) so
+automation can refuse to launch a lane until the packet is fixed.
+
 ## Subprocess safety
 
 * Use `shell=False` everywhere except the user-supplied gate command. That

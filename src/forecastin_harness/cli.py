@@ -20,6 +20,15 @@ from typing import Sequence
 
 from . import __version__
 from .config import ConfigError, HarnessConfig, load_config
+from .controller import (
+    TaskPacketLoadError,
+    diagnose,
+    enumerate_processes,
+    probe_git,
+    render_doctor_report,
+    render_validation_report,
+    validate_packet_file,
+)
 from .gate_supervisor import DEFAULT_DEADLINE_SECONDS, stop as gate_stop, summarise as gate_summarise, supervise
 from .gates import initialise as gate_initialise
 from .gates import plan_gate, read_state, tail_text
@@ -181,6 +190,35 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_apply(p_pr_merge)
     p_pr_merge.set_defaults(func=cmd_pr_merge)
+
+    # controller (read-only safety checks)
+    p_ctrl = sub.add_parser(
+        "controller",
+        help="Controller safety checks (validate task packets, doctor environment).",
+    )
+    p_ctrl_sub = p_ctrl.add_subparsers(dest="controller_cmd", required=True)
+
+    p_ctrl_validate = p_ctrl_sub.add_parser(
+        "validate",
+        help="Validate a task packet against controller safety rules.",
+    )
+    p_ctrl_validate.add_argument(
+        "--task-file",
+        required=True,
+        help="Path to the YAML task packet to validate.",
+    )
+    p_ctrl_validate.set_defaults(func=cmd_controller_validate)
+
+    p_ctrl_doctor = p_ctrl_sub.add_parser(
+        "doctor",
+        help="Report active processes, current branch, and cwd-vs-target match.",
+    )
+    p_ctrl_doctor.add_argument(
+        "--config",
+        default=None,
+        help="Optional adapter YAML; needed to compare cwd against target.path.",
+    )
+    p_ctrl_doctor.set_defaults(func=cmd_controller_doctor)
 
     return parser
 
@@ -499,6 +537,39 @@ def cmd_pr_merge(args: argparse.Namespace) -> int:
     if rc != 0:
         print(f"gh exited {rc}; merge may have failed", file=sys.stderr)
     return rc
+
+
+def cmd_controller_validate(args: argparse.Namespace) -> int:
+    """Validate a task packet. Exit 0 on PASS, 1 on FAIL, 2 on load error."""
+    try:
+        report = validate_packet_file(args.task_file)
+    except TaskPacketLoadError as exc:
+        print(f"task packet load error: {exc}", file=sys.stderr)
+        return 2
+    print(render_validation_report(report))
+    return 0 if report.ok else 1
+
+
+def cmd_controller_doctor(args: argparse.Namespace) -> int:
+    """Report process and git state. Exit 0 always (read-only)."""
+    target_path: Path | None = None
+    if args.config is not None:
+        try:
+            config = load_config(args.config)
+            target_path = config.target.path
+        except ConfigError as exc:
+            print(f"config error: {exc}", file=sys.stderr)
+            return 2
+    cwd = Path.cwd()
+    rows = enumerate_processes()
+    report = diagnose(
+        cwd=cwd,
+        target_path=target_path,
+        processes=rows,
+        git_probe=probe_git,
+    )
+    print(render_doctor_report(report))
+    return 0
 
 
 def _config_and_store(config_path: str) -> tuple[HarnessConfig, StateStore]:
