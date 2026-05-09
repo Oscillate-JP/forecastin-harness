@@ -95,8 +95,13 @@ def build_parser() -> argparse.ArgumentParser:
     p_task_render.add_argument("--agent", required=True, choices=SUPPORTED_AGENTS)
     p_task_render.add_argument(
         "--templates-dir",
-        default=str(_default_templates_dir()),
-        help="Directory holding <agent>_prompt.md templates.",
+        default=None,
+        help=(
+            "Directory holding <agent>_prompt.md templates. Default: load "
+            "from the installed forecastin_harness.templates package via "
+            "importlib.resources (works from a wheel install, no repo layout "
+            "assumption)."
+        ),
     )
     p_task_render.set_defaults(func=cmd_task_render)
 
@@ -187,18 +192,6 @@ def _add_apply(p: argparse.ArgumentParser) -> None:
         default=False,
         help="Apply the planned change. Without this flag the command is plan-only.",
     )
-
-
-def _default_templates_dir() -> Path:
-    # Templates ship next to the package source in the repo layout, NOT inside
-    # the installed package. We therefore resolve relative to the repo root
-    # discovered upward from this file. If not found, fall back to CWD/templates.
-    here = Path(__file__).resolve()
-    for parent in here.parents:
-        candidate = parent / "templates"
-        if candidate.is_dir():
-            return candidate
-    return Path.cwd() / "templates"
 
 
 # ---------------- command implementations ----------------
@@ -323,8 +316,11 @@ def cmd_task_render(args: argparse.Namespace) -> int:
     except TaskPacketError as exc:
         print(f"task packet error: {exc}", file=sys.stderr)
         return 2
+    # When --templates-dir is unset, pass None straight through so render_prompt
+    # loads the agent template from the installed package via importlib.resources.
+    templates_dir = Path(args.templates_dir) if args.templates_dir else None
     try:
-        text = render_prompt(packet, args.agent, templates_dir=Path(args.templates_dir))
+        text = render_prompt(packet, args.agent, templates_dir=templates_dir)
     except (FileNotFoundError, KeyError, ValueError) as exc:
         print(f"render error: {exc}", file=sys.stderr)
         return 2
@@ -425,7 +421,7 @@ def _build_command_spec(command: str, mode: str | None) -> CommandSpec:
 
 
 def cmd_pr_check(args: argparse.Namespace) -> int:
-    _, store = _config_and_store(args.config)
+    config, store = _config_and_store(args.config)
     if not args.apply:
         print(plan_pr_check(pr_number=args.pr, head_sha=args.head_sha))
         print()
@@ -436,7 +432,16 @@ def cmd_pr_check(args: argparse.Namespace) -> int:
         print()
         print("warning: 'gh' is not on PATH; live PR check skipped.")
         return 1
-    result = run_pr_check(store, pr_number=args.pr, head_sha=args.head_sha)
+    # Pin the gate to the configured target so 'gh' cannot fall back to the
+    # cwd's git origin; pass main_branch so pr-base-branch can verify the PR
+    # is heading at the expected branch.
+    result = run_pr_check(
+        store,
+        pr_number=args.pr,
+        head_sha=args.head_sha,
+        repo=config.target.repo,
+        main_branch=config.target.main_branch,
+    )
     print(json.dumps(result.to_dict(), indent=2, sort_keys=True))
     return 0 if result.merge_ready else 1
 

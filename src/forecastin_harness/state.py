@@ -169,14 +169,17 @@ class StateStore:
                         # Best-effort unlock; descriptor close also releases.
                         pass
             else:
+                # POSIX path. fcntl is missing from Pyright's stubs on Windows
+                # hosts, so we suppress the attribute-access warning here. The
+                # whole branch is unreachable on Windows at runtime.
                 import fcntl  # type: ignore[import-not-found]
 
-                fcntl.flock(fd, fcntl.LOCK_EX)
+                fcntl.flock(fd, fcntl.LOCK_EX)  # type: ignore[attr-defined]
                 try:
                     yield
                 finally:
                     try:
-                        fcntl.flock(fd, fcntl.LOCK_UN)
+                        fcntl.flock(fd, fcntl.LOCK_UN)  # type: ignore[attr-defined]
                     except OSError:
                         pass
         finally:
