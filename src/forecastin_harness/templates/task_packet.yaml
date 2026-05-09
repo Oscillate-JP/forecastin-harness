@@ -26,6 +26,49 @@ base_sha: "0000000000000000000000000000000000000000"
 target_repo: "Oscillate-JP/Forecastin"
 worktree: "/abs/path/to/.harness/worktrees/lane-for-example-fix"
 
+# REQUIRED for `forecastin-harness controller validate` to PASS. These keys
+# encode the FOR-220 safety lessons: one objective per lane, an explicit
+# wall-clock budget, an unambiguous official gate command, human-only merge
+# authority, and an explicit refusal of permission-bypass modes.
+#
+# lane_type:
+#   * feature   — product code (backend/app/, frontend/src/, ...)
+#   * gate-fix  — CI / hooks / Makefile / docker / scripts/ci.sh
+#   * review    — read-only review work (no code edits)
+#   * controller — harness-meta work
+# A packet that mixes feature paths and gate-fix paths in files.allowed is
+# rejected; split into two PRs.
+lane_type: "feature"
+
+# Wall-clock budget for the lane. The supervisor uses this to refuse
+# unbounded "stand by" jobs that consume agent context indefinitely.
+max_runtime_minutes: 60
+
+# The single, named gate that decides PASS / FAIL for this lane. Ad-hoc
+# pytest enumeration must NEVER be confused with this command.
+official_gate_command: "bash scripts/ci.sh"
+
+# Diagnostic commands the agent is allowed to run for triage. These are
+# documented as diagnostics — they are NOT a substitute for the official
+# gate above. Use this list to constrain what counts as "looking around"
+# inside a feature lane.
+diagnostic_commands_allowed:
+  - "git status"
+  - "git diff"
+  - "ruff check ."
+  - "pytest --collect-only"
+
+# Merge authority. The harness will refuse autonomous merges; the operator
+# (a human) executes `gh pr merge` after `forecastin-harness pr check`
+# returns merge_ready.
+merge_authority: "human-only"
+
+# An explicit "do not bypass hooks / permission prompts" affirmation. The
+# controller validator rejects any packet that does not set this to true,
+# and rejects any packet whose stringy fields contain bypass tokens
+# (--no-verify, bypass-permissions, ignore-hooks, ...).
+no_bypass_permissions: true
+
 mission: |
   One paragraph. What outcome must exist when the agent stops? Write it so a
   reviewer can read it once and know whether the diff is on-target.
@@ -61,3 +104,13 @@ evidence:
   - "paste the failing-state command output before the change"
   - "paste the passing-state command output after the change"
   - "list the changed files with sizes"
+
+# REQUIRED. Sub-headings the agent's final report MUST contain. The
+# controller validator enforces that the strings 'changed files', 'tests',
+# and 'remaining risks' all appear in this list (case-insensitive substring
+# match), so the operator always gets the same shape of report back.
+final_report:
+  - "Summary"
+  - "Changed files (paths + one-line rationale per file)"
+  - "Tests run (exact commands, tail of output)"
+  - "Remaining risks / follow-ups"
