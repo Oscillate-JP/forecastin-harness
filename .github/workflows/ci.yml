@@ -1,0 +1,72 @@
+name: ci
+
+on:
+  push:
+    branches:
+      - "**"
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: pytest + wheel smoke (py${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: pip-${{ runner.os }}-py${{ matrix.python-version }}-${{ hashFiles('pyproject.toml') }}
+          restore-keys: |
+            pip-${{ runner.os }}-py${{ matrix.python-version }}-
+            pip-${{ runner.os }}-
+
+      - name: Upgrade pip + install build frontend
+        run: python -m pip install --upgrade pip build
+
+      - name: Install package (editable, with dev extras)
+        run: pip install -e ".[dev]"
+
+      - name: Run test suite
+        run: python -m pytest -q
+
+      - name: CLI help smoke (module entry)
+        run: python -m forecastin_harness.cli --help
+
+      - name: Build wheel
+        run: python -m build --wheel
+
+      - name: Reinstall from built wheel
+        # Force reinstall the wheel to verify package-data (templates) ship
+        # correctly in the distribution and not just in the editable layout.
+        run: pip install --force-reinstall dist/*.whl
+
+      - name: CLI help smoke (entry point, fresh shell)
+        # Fresh shell isolates from the prior step's env and proves the
+        # console-script entry point in the installed wheel resolves
+        # without the editable install.
+        shell: bash
+        run: |
+          set -euo pipefail
+          forecastin-harness --help
