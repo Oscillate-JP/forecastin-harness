@@ -1,7 +1,7 @@
 # forecastin-harness
 
 A standalone, reusable AI-agent harness for orchestrating Claude, Codex, and Gemini
-against a target repository — primarily [Oscillate-JP/Forecastin](https://github.com/Oscillate-JP/Forecastin),
+against a target repository.
 but designed to point at any well-defined target repo.
 
 > **This repository is infrastructure**, not product code. It does not contain
