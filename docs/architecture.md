@@ -45,9 +45,11 @@ no public commitment is made about their stability across versions until 1.0.
    line, sorted keys, UTC timestamps. We deliberately accept the duplication
    between lane records and the audit log — the registry holds the *current*
    view, the log holds *how we got there*.
-4. **Dry-run is default for state changes.** Every mutating command surfaces
-   the exact commands or files it would touch before doing so. The operator
-   has to opt out of dry-run.
+4. **Plan-only is default for state changes (fail-closed).** Every mutating
+   command surfaces the exact commands or files it would touch before doing
+   so. The operator has to explicitly pass ``--apply`` to opt in. v0.3
+   inverted the v0.2 ``--dry-run`` semantics so a mistyped command without
+   ``--apply`` cannot mutate state or contact GitHub.
 5. **Subprocess is shell-isolated.** Internal commands (`git`, `gh`,
    `rev-parse`) run with `shell=False` and explicit argv lists. The only
    `shell=True` path is the *user-supplied gate command*, which is documented
@@ -61,10 +63,10 @@ no public commitment is made about their stability across versions until 1.0.
 ```
 plan_lane (pure)
    │
-   │ --dry-run prints commands; nothing happens
+   │ default (no --apply) prints commands; nothing happens
    │
    ▼
-apply_plan
+apply_plan  (only reached when the operator passes --apply)
    ├── git fetch origin --prune
    ├── git worktree add -b lane/<task>-<name> <root/name> origin/<main>
    ├── git rev-parse base + HEAD (recorded into state)
@@ -115,22 +117,25 @@ never silently passes. `merge_ready=true` requires every outcome to be
 `<state>/pr/<n>.merge_ready.json` and prints a *suggested* `gh pr merge`
 command. Execution is the operator's responsibility.
 
-## v0.1 → v0.2 capability boundary
+## v0.1 → v0.2 → v0.3 capability boundary
 
-| capability | v0.1 | v0.2 |
-|---|---|---|
-| Config + state layout | ✅ | ✅ |
-| Lane planner (dry-run) | ✅ | ✅ |
-| Prompt rendering | ✅ | ✅ |
-| Gate **state machine** | ✅ | ✅ |
-| Gate **supervisor** (Popen, deadline, log streaming) | ❌ | ✅ |
-| `gate stop` / `gate summarise` | ❌ | ✅ |
-| Cross-platform rendering (posix/powershell/argv) | ❌ | ✅ |
-| PR check skeleton | ✅ | ✅ |
-| `pr merge` planner with refusal paths | ❌ | ✅ |
-| `pr merge --execute` (guarded) | ❌ | ✅ |
-| `--repo` pin in rendered `gh` argv | ❌ | ✅ |
-| CodeRabbit `coderabbit-clean` outcome | ❌ | ✅ |
+| capability | v0.1 | v0.2 | v0.3 |
+|---|---|---|---|
+| Config + state layout | ✅ | ✅ | ✅ |
+| Lane planner (plan-only) | ✅ | ✅ | ✅ |
+| Prompt rendering | ✅ | ✅ | ✅ |
+| Gate **state machine** | ✅ | ✅ | ✅ |
+| Gate **supervisor** (Popen, deadline, log streaming) | ❌ | ✅ | ✅ |
+| `gate stop` / `gate summarise` | ❌ | ✅ | ✅ |
+| Cross-platform rendering (posix/powershell/argv) | ❌ | ✅ | ✅ |
+| PR check skeleton | ✅ | ✅ | ✅ |
+| `pr merge` planner with refusal paths | ❌ | ✅ | ✅ |
+| `pr merge --execute` (guarded) | ❌ | ✅ | ✅ |
+| `--repo` pin in rendered `gh` argv | ❌ | ✅ | ✅ |
+| CodeRabbit `coderabbit-clean` outcome | ❌ | ✅ | ✅ |
+| **Fail-closed default** (`--apply` replaces `--dry-run`) | ❌ | ❌ | ✅ |
+| **`pr merge` requires `--apply --execute --operator-confirmed`** | ❌ | ❌ | ✅ |
+| **`init` rejects `--target-repo` / `config.target.path` mismatch** | ❌ | ❌ | ✅ |
 
 ## Gate supervisor
 
