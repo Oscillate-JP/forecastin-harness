@@ -115,8 +115,30 @@ tests/                        pytest suite
 
 ## Status
 
-This is the **initial vertical slice**. It implements config loading, state
-files, dry-run lane planning, prompt rendering, gate state, and a PR-gate
-skeleton, with tests for each. Full background-process gate execution and
-end-to-end PR-merge orchestration are deliberately out of scope for the first
-pass; see `docs/architecture.md` § "Roadmap" for what comes next.
+### v0.2 (current)
+
+Adds:
+* **Gate supervisor** that actually runs a configured command via
+  `subprocess.Popen`, streams stdout/stderr to a deterministic log, enforces
+  a wall-clock deadline, and writes terminal status (`passed` / `failed` /
+  `timeout` / `killed`) into the state file.
+* **`gate stop` and `gate summarise`** subcommands.
+* **`pr merge`** — guarded merge-command rendering. Refuses without a
+  matching `merge_ready.json`, refuses on SHA mismatch, refuses to execute
+  without both `--operator-confirmed` and `--execute`, and pins
+  `--repo <owner>/<name>` so the rendered `gh` call is bound to the
+  configured target repo (it cannot accidentally target the cwd's origin).
+* **CodeRabbit detection** — a `coderabbit-clean` PR-check outcome that
+  parses comments/reviews and refuses merge-ready when an unresolved
+  critical / security / correctness comment from `coderabbitai[bot]`
+  exists.
+* **Cross-platform command rendering** — `posix`, `powershell`, and
+  `argv` modes; `--mode` flag on `gate start`.
+
+Every previously-shipping behaviour from v0.1 is preserved; dry-run is
+still the default for state-changing commands.
+
+### v0.1
+
+Implemented config loading, state files, dry-run lane planning, prompt
+rendering, gate state, and a PR-gate skeleton, with tests for each.

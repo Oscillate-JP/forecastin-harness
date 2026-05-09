@@ -71,27 +71,62 @@ Pipe the output into your agent of choice. The same packet renders for
 
 ### 3. Run a long gate
 
-Once an agent has produced a diff, run the canonical CI gate. v0.1 plans
-the gate but does not spawn it; the operator runs the printed command in a
-separate terminal:
+Once an agent has produced a diff, run the canonical CI gate. **v0.2
+spawns the gate process itself** under a supervisor with a wall-clock
+deadline; the operator no longer runs the command by hand.
 
 ```powershell
-# Plan only (recommended first):
+# Plan only (always recommended first):
 forecastin-harness gate start `
   --config configs/forecastin.example.yaml `
   --name backend-pytest `
   --command "bash scripts/ci.sh" `
+  --deadline-seconds 5400 `
   --dry-run
 ```
 
-When the operator runs the planned command in a background terminal, an
-external supervisor script (or, in the future, this harness) writes
-status updates via the gate state API. Inspect the state with:
+Drop `--dry-run` to actually run it. The CLI streams status while the
+supervisor blocks until terminal:
 
 ```powershell
-forecastin-harness gate status --config configs/forecastin.example.yaml --name backend-pytest
-forecastin-harness gate tail   --config configs/forecastin.example.yaml --name backend-pytest --lines 100
+forecastin-harness gate start `
+  --config configs/forecastin.example.yaml `
+  --name backend-pytest `
+  --command "bash scripts/ci.sh" `
+  --deadline-seconds 5400
 ```
+
+When the gate finishes (or times out) the CLI prints `gate <name> -> <status>`,
+exit code, and timeout flag. Inspect persistent state and logs:
+
+```powershell
+forecastin-harness gate status     --config configs/forecastin.example.yaml --name backend-pytest
+forecastin-harness gate tail       --config configs/forecastin.example.yaml --name backend-pytest --lines 200
+forecastin-harness gate summarise  --config configs/forecastin.example.yaml --name backend-pytest
+```
+
+`summarise` returns a single JSON blob with status, exit code, log path,
+log size, and transition count. It's intended for piping into another
+shell command (e.g. `... | jq .status`).
+
+To cancel a running gate from another shell:
+
+```powershell
+forecastin-harness gate stop --config configs/forecastin.example.yaml --name backend-pytest
+```
+
+### 3a. Why these gates are separate from Forecastin's gates
+
+Forecastin product PRs gate on `scripts/ci.sh`, the pre-push hook, and
+CodeRabbit. Those gates are correct *for Forecastin*. The harness's gate
+supervisor is **not a substitute** for them — it's a wrapper that runs
+the same `bash scripts/ci.sh` (or whatever the adapter says) under a
+deterministic deadline + log path so an agent doing many parallel runs
+doesn't lose state when its shell dies.
+
+Conversely, the harness has its own pytest gate (`python -m pytest` in
+this repo). When you are working on the *harness itself*, only that gate
+applies; do not invoke Forecastin product hooks against harness changes.
 
 ### 4. Open the PR (manually)
 
@@ -125,8 +160,38 @@ forecastin-harness pr check `
 
 If every outcome is `pass`, the harness writes
 `<state>/pr/2788.merge_ready.json` containing a *suggested* merge command.
-**The harness does not run that command.** Run it yourself when you are
-satisfied.
+You can let the harness render and (with explicit confirmation) execute
+that merge:
+
+```powershell
+# Plan-only:
+forecastin-harness pr merge `
+  --config configs/forecastin.example.yaml `
+  --pr 2788 --head-sha 8f91dcf3 --dry-run
+
+# Print the rendered command but do NOT run it:
+forecastin-harness pr merge `
+  --config configs/forecastin.example.yaml `
+  --pr 2788 --head-sha 8f91dcf3
+
+# Actually merge — both flags required:
+forecastin-harness pr merge `
+  --config configs/forecastin.example.yaml `
+  --pr 2788 --head-sha 8f91dcf3 `
+  --operator-confirmed --execute
+```
+
+Refusal paths the harness enforces:
+* missing `merge_ready.json` → exit 2 with explanation
+* recorded SHA ≠ supplied SHA → exit 2 with both SHAs
+* recorded verdict not in {`merge_ready`, `approved`} → exit 2
+* `--execute` without `--operator-confirmed` → exit 2
+* `gh` not on PATH and `--execute` requested → exit 2
+
+The rendered `gh pr merge` command always includes
+`--repo <target.repo>`. This makes the merge target explicit and prevents
+the all-too-common mistake of running it from a different checkout, where
+`gh` would otherwise default to that checkout's origin.
 
 ### 6. Retire the lane
 

@@ -115,18 +115,81 @@ never silently passes. `merge_ready=true` requires every outcome to be
 `<state>/pr/<n>.merge_ready.json` and prints a *suggested* `gh pr merge`
 command. Execution is the operator's responsibility.
 
-## Roadmap (deliberately out of scope for v0.1)
+## v0.1 → v0.2 capability boundary
 
-* Background gate spawn + supervisor (PID tracking, deadline enforcement,
-  state transitions driven by process events). The state model already
-  supports this; the spawn logic is a follow-up.
+| capability | v0.1 | v0.2 |
+|---|---|---|
+| Config + state layout | ✅ | ✅ |
+| Lane planner (dry-run) | ✅ | ✅ |
+| Prompt rendering | ✅ | ✅ |
+| Gate **state machine** | ✅ | ✅ |
+| Gate **supervisor** (Popen, deadline, log streaming) | ❌ | ✅ |
+| `gate stop` / `gate summarise` | ❌ | ✅ |
+| Cross-platform rendering (posix/powershell/argv) | ❌ | ✅ |
+| PR check skeleton | ✅ | ✅ |
+| `pr merge` planner with refusal paths | ❌ | ✅ |
+| `pr merge --execute` (guarded) | ❌ | ✅ |
+| `--repo` pin in rendered `gh` argv | ❌ | ✅ |
+| CodeRabbit `coderabbit-clean` outcome | ❌ | ✅ |
+
+## Gate supervisor
+
+```
+plan_gate (pure)
+    │
+    ▼
+supervise()
+    ├── ensure state file exists, mark "running"
+    ├── Popen(command.to_subprocess_argv(), shell=False, stdout=log, stderr=STDOUT)
+    ├── poll until terminal OR (now − started) ≥ deadline
+    ├── on deadline: terminate (SIGTERM grace) → kill (SIGKILL)
+    ├── write exit_path with the captured returncode
+    └── transition state to passed | failed | timeout
+```
+
+The supervisor never uses `shell=True`. POSIX and PowerShell snippets are
+wrapped explicitly: `["bash", "-lc", snippet]` / `["powershell",
+"-NoProfile", "-NonInteractive", "-Command", snippet]`. Argv mode passes
+the operator's argv straight to Popen with no shell at all.
+
+The trust boundary is the operator-supplied snippet itself. Treat it the
+same way you would treat a script the operator wrote and saved to disk;
+the harness does not sanitise it.
+
+## Cross-platform command rendering
+
+`src/forecastin_harness/rendering.py` exposes a tiny
+:class:`CommandSpec` that knows how to:
+
+* render itself for operator output (`display()` returns a single line),
+* produce the argv passed to `subprocess.Popen` (`to_subprocess_argv()`),
+* enforce that exactly one of (snippet, argv) is set per mode.
+
+`from_string` and `from_argv` are the only public factories. `from_string`
+defaults to `posix` on POSIX hosts and `powershell` on Windows; the CLI
+`--mode` flag overrides the default.
+
+## PR-merge guard
+
+`pr_gate.plan_pr_merge` is a pure function that reads
+`<state>/pr/<n>.merge_ready.json` and refuses to produce a plan when:
+
+* the file is missing,
+* the recorded `head_sha` does not equal the operator-supplied SHA,
+* the recorded `verdict` is not `merge_ready` or `approved`.
+
+Successful plans contain an explicit ``--repo <owner>/<name>`` flag bound
+to the adapter config's `target.repo`. This protects against the
+classic mistake of running the rendered command from a different
+checkout: without `--repo`, `gh pr merge` falls back to whatever git
+origin the cwd points at. The harness never relies on cwd inference.
+
+## Roadmap (out of scope for v0.2)
+
+* Streaming `gate tail --follow` mode for live log watching.
 * Lane re-attachment after a worktree is moved on disk.
 * `gh`-API rate-limit handling and pagination on noisy PRs.
-* Cross-platform support for non-bash gate commands. The current planner
-  prints a `bash -c` recipe; the model is generic but the renderer is
-  bash-shaped.
-* `forecastin-harness pr merge` — only behind an explicit
-  `--operator-confirmed` flag; the artefact is already there.
-
-These are listed so a contributor can pick one without re-deriving the
-architecture.
+* `pr merge` recovery if `gh` returns a non-zero exit (currently the audit
+  log records the attempt; recovery is operator-driven).
+* Adapter test that drives the harness against a real Forecastin checkout
+  in dry-run mode.

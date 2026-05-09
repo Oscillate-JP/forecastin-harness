@@ -55,12 +55,29 @@ state:
   navigation work without re-cloning.
 * `commands.full_ci` should be `"bash scripts/ci.sh"` for Forecastin. That
   script is the same one the pre-push hook runs; using it via the gate
-  keeps local pre-push and gated CI in lock-step. (See README for the v0.1
-  caveat that `scripts/ci.sh` is currently failing on a pre-existing test;
-  the gate models that as `failed`, which is the correct outcome.)
+  keeps local pre-push and gated CI in lock-step. The harness's gate
+  supervisor wraps it; it does not replace or weaken any of Forecastin's
+  own gates.
 * `merge.policy: operator-confirmed` is mandatory. Forecastin's branch
   protection rules + CodeRabbit review + pre-push CI must all run before
   any merge; the harness must not bypass any of them.
+
+### What the harness does and does NOT do to your Forecastin checkout
+
+The harness only writes inside `<target.path>/<state.dir>` (default
+`.harness/state`) and inside `<worktrees.root>` for lane worktrees.
+It does **not**:
+
+* push branches, run `git config`, or modify Forecastin's `.git/hooks/`,
+* invoke `git worktree remove --force`,
+* edit any file outside the configured worktree directories,
+* run `gh pr merge` without `--repo <target.repo>` pinned and without
+  `--operator-confirmed --execute` from the operator.
+
+When `forecastin-harness init` is pointed at `J:/Forcastin`, the only
+filesystem effect is the creation of `J:/Forcastin/.harness/state/` if it
+did not exist. That directory is gitignore-friendly — Forecastin's
+existing `.gitignore` already excludes it.
 
 ## What the adapter does NOT cover
 
