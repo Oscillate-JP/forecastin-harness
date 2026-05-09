@@ -47,6 +47,17 @@ and stop; do not invent a Forecastin-shaped substitute gate.
    imports are not.
 3. **Never use `--no-verify`.** This repo does not yet ship a pre-commit
    config; that is by design. When one is added, do not bypass it.
+3a. **Never evade hooks, guards, or scanners.** Do not work around a hook,
+   guard, scanner, or audit gate by using indirect subprocesses, renamed
+   commands, encoded strings, alternate shells, file-redirected commit
+   messages chosen to dodge a regex, or any other wording trick. If a
+   guard blocks an action, stop and report. This applies whether the
+   guard belongs to this repo or to a parent repo whose hooks happen to
+   intercept your commands. The right response to a misfiring guard is
+   to surface the conflict, not to rephrase the call until it stops
+   matching. Pre-authorisation to ignore the *content* of a guard (for
+   example, "Forecastin merge-ready reminders do not apply to harness
+   work") never authorises evading the guard's *mechanism*.
 4. **Default to dry-run** for every state-changing CLI command. The
    operator opts out by dropping `--dry-run`.
 5. **No secrets in tests.** All tests must run offline. `gh` integration

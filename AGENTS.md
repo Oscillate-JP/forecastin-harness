@@ -52,6 +52,19 @@ correct action is:
 * Persisted state lives only in `<target_repo>/<state.dir>` — never inside
   this harness repo's own working tree (except for the `tests/` fixtures).
 
+## Never evade guards
+
+Do not evade hooks, guards, or scanners by using indirect subprocesses,
+renamed commands, encoded strings, alternate shells, or wording tricks.
+If a guard blocks an action, stop and report.
+
+This applies even when the guard is misfiring (for example, a parent
+repo's Bash hook matching on a literal command string while you are
+working in a different repo). The correct response is to surface the
+conflict to the operator, not to rephrase the call so the regex no
+longer matches. Pre-authorisation to ignore the *content* of a guard
+never authorises evading the guard's *mechanism*.
+
 ## Output contract for agent replies
 
 When you finish a task, reply with:
