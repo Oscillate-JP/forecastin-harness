@@ -3,6 +3,10 @@
 You are operating as a coding assistant inside an isolated git worktree on
 branch `$branch`, based on `$base_sha`.
 
+## Repository identity
+- Target repo: $target_repo
+- Worktree path: $worktree
+
 ## Mission
 $mission
 

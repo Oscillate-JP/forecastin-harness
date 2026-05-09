@@ -43,6 +43,16 @@ _REQUIRED_KEYS = (
     "evidence",
 )
 
+#: Lists that MUST contain at least one entry. Empty lists here mean the lane
+#: definition is incomplete: an agent with no acceptance criteria, no tests,
+#: no stop conditions or no evidence requirements has no contract to honour.
+_REQUIRED_NONEMPTY: tuple[str, ...] = (
+    "acceptance",
+    "tests",
+    "stop_conditions",
+    "evidence",
+)
+
 
 class TaskPacketError(ValueError):
     """Raised when a task packet fails validation."""
@@ -61,6 +71,8 @@ class TaskPacket:
     task_id: str = ""
     branch: str = ""
     base_sha: str = ""
+    target_repo: str = ""
+    worktree: str = ""
     extra: Mapping[str, Any] | None = None
 
     def to_substitutions(self) -> dict[str, str]:
@@ -69,6 +81,8 @@ class TaskPacket:
             "task_id": self.task_id or "(unset)",
             "branch": self.branch or "(unset)",
             "base_sha": self.base_sha or "(unset)",
+            "target_repo": self.target_repo or "(unset)",
+            "worktree": self.worktree or "(unset)",
             "mission": self.mission,
             "scope": self.scope,
             "files_allowed": _bullet_lines(self.files_allowed) or "(none specified)",
@@ -100,23 +114,40 @@ def parse_packet(raw: Mapping[str, Any]) -> TaskPacket:
     if not isinstance(files, Mapping):
         raise TaskPacketError("files must be a mapping with allowed/forbidden lists")
 
+    parsed_lists: dict[str, tuple[str, ...]] = {
+        name: _to_str_tuple(raw[name], name) for name in _REQUIRED_NONEMPTY
+    }
+    for name in _REQUIRED_NONEMPTY:
+        if not parsed_lists[name]:
+            raise TaskPacketError(
+                f"{name!r} must contain at least one entry; got empty list"
+            )
+
     return TaskPacket(
         mission=_require_str(raw, "mission"),
         scope=_require_str(raw, "scope"),
         files_allowed=_to_str_tuple(files.get("allowed", []), "files.allowed"),
         files_forbidden=_to_str_tuple(files.get("forbidden", []), "files.forbidden"),
-        acceptance=_to_str_tuple(raw["acceptance"], "acceptance"),
-        tests=_to_str_tuple(raw["tests"], "tests"),
-        stop_conditions=_to_str_tuple(raw["stop_conditions"], "stop_conditions"),
-        evidence=_to_str_tuple(raw["evidence"], "evidence"),
+        acceptance=parsed_lists["acceptance"],
+        tests=parsed_lists["tests"],
+        stop_conditions=parsed_lists["stop_conditions"],
+        evidence=parsed_lists["evidence"],
         task_id=str(raw.get("task_id", "")),
         branch=str(raw.get("branch", "")),
         base_sha=str(raw.get("base_sha", "")),
+        target_repo=str(raw.get("target_repo", "")),
+        worktree=str(raw.get("worktree", "")),
         extra={k: v for k, v in raw.items() if k not in _RECOGNISED_KEYS} or None,
     )
 
 
-_RECOGNISED_KEYS = set(_REQUIRED_KEYS) | {"task_id", "branch", "base_sha"}
+_RECOGNISED_KEYS = set(_REQUIRED_KEYS) | {
+    "task_id",
+    "branch",
+    "base_sha",
+    "target_repo",
+    "worktree",
+}
 
 
 def render_prompt(

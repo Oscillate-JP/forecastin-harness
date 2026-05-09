@@ -1,10 +1,13 @@
 # Canonical task packet schema.
 #
-# Every field is required unless marked OPTIONAL. The same packet drives Claude,
-# Codex, and Gemini prompt rendering — see `templates/<agent>_prompt.md`.
+# Every field is required unless marked OPTIONAL. The same packet drives
+# Claude, Codex, and Gemini prompt rendering — see the sibling
+# `<agent>_prompt.md` files under `forecastin_harness/templates/`.
 #
 # Lists may be either YAML sequences or single strings; a single string is
-# treated as a one-element list.
+# treated as a one-element list. The four critical lists (acceptance, tests,
+# stop_conditions, evidence) MUST contain at least one entry — the loader
+# rejects empty lists outright.
 
 # OPTIONAL: free-form identifier; the harness pre-fills this when rendering
 # from a registered lane.
@@ -15,6 +18,13 @@ task_id: "FOR-EXAMPLE"
 # naming it explicitly.
 branch: "lane/for-example-fix"
 base_sha: "0000000000000000000000000000000000000000"
+
+# OPTIONAL: target_repo names the upstream repository the lane operates on
+# (e.g. "Oscillate-JP/Forecastin"). worktree is the absolute path to the
+# isolated checkout where the agent must run. Both are surfaced in the
+# rendered prompt's "Repository identity" section.
+target_repo: "Oscillate-JP/Forecastin"
+worktree: "/abs/path/to/.harness/worktrees/lane-for-example-fix"
 
 mission: |
   One paragraph. What outcome must exist when the agent stops? Write it so a

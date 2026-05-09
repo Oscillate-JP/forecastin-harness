@@ -3,6 +3,10 @@
 You are an engineering assistant working in an isolated git worktree.
 Branch: `$branch`. Base commit: `$base_sha`.
 
+## Repository identity
+- Target repo: $target_repo
+- Worktree path: $worktree
+
 ## Mission
 $mission
 
