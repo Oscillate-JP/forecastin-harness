@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "forecastin-harness"
+version = "0.1.0"
+description = "Standalone AI-agent harness for orchestrating Claude, Codex, and Gemini against a target repository (Forecastin and friends)."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "Proprietary" }
+authors = [{ name = "Oscillate-JP" }]
+keywords = ["agents", "harness", "claude", "codex", "gemini", "worktree", "ci"]
+dependencies = [
+    "PyYAML>=6.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-cov>=4.0",
+]
+
+[project.scripts]
+forecastin-harness = "forecastin_harness.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+forecastin_harness = ["py.typed"]
+
+[tool.pytest.ini_options]
+addopts = "-q -ra"
+testpaths = ["tests"]
+filterwarnings = ["error::DeprecationWarning"]

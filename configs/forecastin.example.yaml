@@ -1,0 +1,43 @@
+# Example adapter config for the Forecastin target repo.
+# Copy this file, edit the paths to match the operator's machine, and pass it
+# to `forecastin-harness init --config <path>`.
+
+target:
+  repo: Oscillate-JP/Forecastin
+  # Local working copy. Windows path; adjust for Linux/macOS.
+  path: J:/Forcastin
+  main_branch: main
+
+worktrees:
+  # Where lane worktrees are created. Keep this *inside* the target repo so
+  # `git worktree list` finds them and a single `.git` directory backs them all.
+  root: J:/Forcastin/.harness/worktrees
+
+agents:
+  - claude
+  - codex
+  - gemini
+
+commands:
+  # The operator may treat all commands as editable. They are documented here
+  # so an agent prompt always knows the canonical invocation.
+  backend_test: "cd backend && poetry run pytest -x"
+  frontend_test: "cd frontend && npm test -- --watchAll=false"
+  # Lints below are recommended but not load-bearing for this slice.
+  backend_lint: "cd backend && ruff check ."
+  frontend_lint: "cd frontend && npm run lint"
+  full_ci: "bash scripts/ci.sh"
+
+health:
+  backend_url: "http://localhost:9000/health"
+  frontend_url: "http://localhost:3002"
+
+merge:
+  # 'operator-confirmed' means the harness can prepare merge_ready.json but
+  # never invokes `gh pr merge`. The other allowed value 'auto' is reserved
+  # for a future trusted-CI mode and is not honoured by this slice.
+  policy: operator-confirmed
+
+state:
+  # State directory, relative to target.path. One state dir per checkout.
+  dir: ".harness/state"

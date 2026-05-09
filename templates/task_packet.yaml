@@ -1,0 +1,53 @@
+# Canonical task packet schema.
+#
+# Every field is required unless marked OPTIONAL. The same packet drives Claude,
+# Codex, and Gemini prompt rendering — see `templates/<agent>_prompt.md`.
+#
+# Lists may be either YAML sequences or single strings; a single string is
+# treated as a one-element list.
+
+# OPTIONAL: free-form identifier; the harness pre-fills this when rendering
+# from a registered lane.
+task_id: "FOR-EXAMPLE"
+
+# OPTIONAL: branch and base SHA fill in automatically when rendered against a
+# lane. They are present so the prompt never refers to "your branch" without
+# naming it explicitly.
+branch: "lane/for-example-fix"
+base_sha: "0000000000000000000000000000000000000000"
+
+mission: |
+  One paragraph. What outcome must exist when the agent stops? Write it so a
+  reviewer can read it once and know whether the diff is on-target.
+
+scope: |
+  Concrete description of the slice. Be explicit about what is in *and* out.
+  An agent will read this twice: once at start, once when checking acceptance.
+
+files:
+  allowed:
+    - backend/app/api/v1/endpoints/example.py
+    - backend/tests/api/v1/endpoints/test_example.py
+  forbidden:
+    - backend/app/services/_legacy/**
+    - frontend/**
+    - docs/**
+
+acceptance:
+  - "pytest backend/tests/api/v1/endpoints/test_example.py passes"
+  - "no import of forbidden modules introduced"
+  - "diff is < 200 lines excluding tests"
+
+tests:
+  - "cd backend && poetry run pytest backend/tests/api/v1/endpoints/test_example.py -x"
+
+stop_conditions:
+  - "all acceptance checks pass on the agent's worktree"
+  - "the agent encounters a forbidden-files violation request"
+  - "tests cannot be run because of missing fixtures (report and stop)"
+  - "any change would touch git config, hooks, or scripts/ci.sh"
+
+evidence:
+  - "paste the failing-state command output before the change"
+  - "paste the passing-state command output after the change"
+  - "list the changed files with sizes"
