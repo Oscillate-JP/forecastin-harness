@@ -1,11 +1,13 @@
 """``forecastin-harness`` command-line entry point.
 
 The CLI is intentionally thin: each subcommand wires arguments through to the
-relevant module. Dry-run is the default for every state-changing command;
-the operator must pass an explicit flag (or the absence of ``--dry-run``)
-to apply changes. Every command emits human-readable text on stdout and a
-non-zero exit code on validation failure so it is safe to compose in a
-shell pipeline.
+relevant module. Plan-only is the default for every state-changing command;
+the operator must pass an explicit ``--apply`` to mutate state or contact
+GitHub. v0.3 inverts the v0.2 ``--dry-run`` semantics so the CLI is
+fail-closed: a mistyped command without ``--apply`` never mutates state.
+
+Every command emits human-readable text on stdout and a non-zero exit code
+on validation failure so it is safe to compose in a shell pipeline.
 """
 
 from __future__ import annotations
@@ -66,13 +68,13 @@ def build_parser() -> argparse.ArgumentParser:
     p_l_list.add_argument("--config", required=True)
     p_l_list.set_defaults(func=cmd_lanes_list)
 
-    p_l_create = p_lanes_sub.add_parser("create", help="Create a new lane (dry-run by default).")
+    p_l_create = p_lanes_sub.add_parser("create", help="Create a new lane (plan-only by default).")
     p_l_create.add_argument("--config", required=True)
     p_l_create.add_argument("--name", required=True)
     p_l_create.add_argument("--task", required=True, help="Task id, e.g. FOR-235.")
     p_l_create.add_argument("--scope", required=True)
     p_l_create.add_argument("--owner", default=None)
-    _add_dry_run(p_l_create)
+    _add_apply(p_l_create)
     p_l_create.set_defaults(func=cmd_lanes_create)
 
     p_l_status = p_lanes_sub.add_parser("status", help="Print a lane status report.")
@@ -82,7 +84,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_l_retire = p_lanes_sub.add_parser("retire", help="Retire a lane.")
     p_l_retire.add_argument("--config", required=True)
     p_l_retire.add_argument("--name", required=True)
-    _add_dry_run(p_l_retire)
+    _add_apply(p_l_retire)
     p_l_retire.set_defaults(func=cmd_lanes_retire)
 
     # task render
@@ -118,7 +120,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=DEFAULT_DEADLINE_SECONDS,
         help=f"Wall-clock deadline before kill. Default: {DEFAULT_DEADLINE_SECONDS}s.",
     )
-    _add_dry_run(p_g_start)
+    _add_apply(p_g_start)
     p_g_start.set_defaults(func=cmd_gate_start)
 
     p_g_status = p_gate_sub.add_parser("status", help="Print gate status.")
@@ -152,7 +154,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_pr_check.add_argument("--config", required=True)
     p_pr_check.add_argument("--pr", type=int, required=True)
     p_pr_check.add_argument("--head-sha", required=True)
-    _add_dry_run(p_pr_check)
+    _add_apply(p_pr_check)
     p_pr_check.set_defaults(func=cmd_pr_check)
 
     p_pr_merge = p_pr_sub.add_parser(
@@ -172,17 +174,18 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Run the rendered gh pr merge command. Requires --operator-confirmed.",
     )
-    _add_dry_run(p_pr_merge)
+    _add_apply(p_pr_merge)
     p_pr_merge.set_defaults(func=cmd_pr_merge)
 
     return parser
 
 
-def _add_dry_run(p: argparse.ArgumentParser) -> None:
+def _add_apply(p: argparse.ArgumentParser) -> None:
     p.add_argument(
-        "--dry-run",
+        "--apply",
         action="store_true",
-        help="Plan only; do not modify state or invoke external tools.",
+        default=False,
+        help="Apply the planned change. Without this flag the command is plan-only.",
     )
 
 
@@ -208,6 +211,18 @@ def cmd_init(args: argparse.Namespace) -> int:
         print(f"config error: {exc}", file=sys.stderr)
         return 2
     target = Path(args.target_repo).resolve()
+    config_target = Path(config.target.path).resolve()
+    if target != config_target:
+        # Compare after .resolve() so symlinks and case-only differences
+        # (Windows) collapse to the same canonical path before mismatch errors.
+        print(
+            "target repo path does not match config.target.path:\n"
+            f"  --target-repo:      {target}\n"
+            f"  config.target.path: {config_target}\n"
+            "Update one so they agree before re-running init.",
+            file=sys.stderr,
+        )
+        return 2
     if not target.is_dir():
         print(f"target repo path does not exist: {target}", file=sys.stderr)
         return 2
@@ -262,9 +277,9 @@ def cmd_lanes_create(args: argparse.Namespace) -> int:
     print()
     print("commands:")
     print(plan.render_commands())
-    if args.dry_run:
+    if not args.apply:
         print()
-        print("(dry-run; nothing executed)")
+        print("(plan-only; pass --apply to create the lane)")
         return 0
     lane = apply_plan(plan, store, owner=args.owner)
     print()
@@ -288,12 +303,14 @@ def cmd_lanes_status(args: argparse.Namespace) -> int:
 
 def cmd_lanes_retire(args: argparse.Namespace) -> int:
     _, store = _config_and_store(args.config)
-    if args.dry_run:
+    if not args.apply:
         new = plan_retire(store, args.name)
         print(f"would retire lane: {new.name}")
         print(f"  branch:    {new.branch}")
         print(f"  worktree:  {new.worktree}")
         print("note: harness does NOT remove the worktree from disk; operator does that manually.")
+        print()
+        print("(plan-only; pass --apply to retire the lane)")
         return 0
     new = retire_lane(store, args.name)
     print(f"lane retired: {new.name}")
@@ -322,12 +339,12 @@ def cmd_gate_start(args: argparse.Namespace) -> int:
     spec = _build_command_spec(args.command, args.mode)
     plan = plan_gate(store, name=args.name, command=spec.display())
     print(plan.render())
-    if args.dry_run:
+    if not args.apply:
         print()
         print(f"command (rendered, mode={spec.mode}):")
         print(f"  {spec.display()}")
         print()
-        print("(dry-run; no process spawned, no state file written)")
+        print("(plan-only; pass --apply to spawn the gate process)")
         return 0
     # Idempotent state initialisation, then supervise to terminal.
     gate_initialise(plan, store)
@@ -409,8 +426,10 @@ def _build_command_spec(command: str, mode: str | None) -> CommandSpec:
 
 def cmd_pr_check(args: argparse.Namespace) -> int:
     _, store = _config_and_store(args.config)
-    if args.dry_run:
+    if not args.apply:
         print(plan_pr_check(pr_number=args.pr, head_sha=args.head_sha))
+        print()
+        print("(plan-only; pass --apply to invoke 'gh' against GitHub)")
         return 0
     if not gh_available():
         print(plan_pr_check(pr_number=args.pr, head_sha=args.head_sha))
@@ -442,9 +461,11 @@ def cmd_pr_merge(args: argparse.Namespace) -> int:
     print(f"  verdict:   {plan.verdict}")
     print(f"  ts:        {plan.merge_ready_ts}")
     print(f"  command:   {cmd}")
-    if args.dry_run:
+    if not args.apply:
         print()
-        print("(dry-run; nothing executed)")
+        print(
+            "(plan-only; pass --apply --execute --operator-confirmed to actually merge)"
+        )
         return 0
     if not args.execute:
         print()

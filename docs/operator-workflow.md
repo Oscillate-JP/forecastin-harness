@@ -4,6 +4,11 @@ This is the day-1 workflow for using `forecastin-harness` against
 `Oscillate-JP/Forecastin`. Everything assumes Windows PowerShell; bash-on-WSL
 substitutions are obvious.
 
+> **v0.3 fail-closed default.** Every state-changing subcommand below is
+> **plan-only by default**. To actually mutate state or contact GitHub, add
+> `--apply` (and for `pr merge`, also `--execute --operator-confirmed`).
+> The legacy `--dry-run` flag from v0.2 has been removed.
+
 ## Prerequisites
 
 * Python 3.11+ on PATH.
@@ -37,6 +42,11 @@ forecastin-harness init `
 `init` is idempotent. Re-running it never destroys state; it only ensures
 the layout exists and emits a `harness.init` event in the audit log.
 
+`init` now refuses to run if `--target-repo` (after path normalisation) does
+not equal `config.target.path` (also normalised). The error names both
+paths so the operator can edit one to match the other. This catches the
+common bug where the operator points the harness at the wrong checkout.
+
 ## Day-to-day loop
 
 ### 1. Plan a lane
@@ -46,13 +56,22 @@ forecastin-harness lanes create `
   --config configs/forecastin.example.yaml `
   --name for-235-settings `
   --task FOR-235 `
-  --scope "repair /settings/groups 500" `
-  --dry-run
+  --scope "repair /settings/groups 500"
 ```
 
 The output prints the exact `git worktree add` command the harness would
 run. **Read it.** Confirm the branch name, the worktree path, and the base
-branch are what you expect. Then re-run without `--dry-run` to apply.
+branch are what you expect. Then re-run with `--apply` to actually create
+the lane:
+
+```powershell
+forecastin-harness lanes create `
+  --config configs/forecastin.example.yaml `
+  --name for-235-settings `
+  --task FOR-235 `
+  --scope "repair /settings/groups 500" `
+  --apply
+```
 
 ### 2. Render an agent prompt
 
@@ -76,16 +95,15 @@ spawns the gate process itself** under a supervisor with a wall-clock
 deadline; the operator no longer runs the command by hand.
 
 ```powershell
-# Plan only (always recommended first):
+# Plan only is the default — always inspect first:
 forecastin-harness gate start `
   --config configs/forecastin.example.yaml `
   --name backend-pytest `
   --command "bash scripts/ci.sh" `
-  --deadline-seconds 5400 `
-  --dry-run
+  --deadline-seconds 5400
 ```
 
-Drop `--dry-run` to actually run it. The CLI streams status while the
+Add `--apply` to actually run it. The CLI streams status while the
 supervisor blocks until terminal:
 
 ```powershell
@@ -93,7 +111,8 @@ forecastin-harness gate start `
   --config configs/forecastin.example.yaml `
   --name backend-pytest `
   --command "bash scripts/ci.sh" `
-  --deadline-seconds 5400
+  --deadline-seconds 5400 `
+  --apply
 ```
 
 When the gate finishes (or times out) the CLI prints `gate <name> -> <status>`,
@@ -144,18 +163,18 @@ This keeps the harness off the critical path of opening PRs, where mistakes
 ### 5. Validate the PR
 
 ```powershell
-# Dry-run first to see exactly what the gate will check:
-forecastin-harness pr check `
-  --config configs/forecastin.example.yaml `
-  --pr 2788 `
-  --head-sha 8f91dcf3 `
-  --dry-run
-
-# Then run live (requires gh):
+# Plan-only first (default) to see exactly what the gate will check:
 forecastin-harness pr check `
   --config configs/forecastin.example.yaml `
   --pr 2788 `
   --head-sha 8f91dcf3
+
+# Then run live with --apply (requires gh):
+forecastin-harness pr check `
+  --config configs/forecastin.example.yaml `
+  --pr 2788 `
+  --head-sha 8f91dcf3 `
+  --apply
 ```
 
 If every outcome is `pass`, the harness writes
@@ -164,29 +183,31 @@ You can let the harness render and (with explicit confirmation) execute
 that merge:
 
 ```powershell
-# Plan-only:
-forecastin-harness pr merge `
-  --config configs/forecastin.example.yaml `
-  --pr 2788 --head-sha 8f91dcf3 --dry-run
-
-# Print the rendered command but do NOT run it:
+# Plan-only (default — prints the rendered command and exits):
 forecastin-harness pr merge `
   --config configs/forecastin.example.yaml `
   --pr 2788 --head-sha 8f91dcf3
 
-# Actually merge — both flags required:
+# Same effect: --apply alone still does NOT execute, only acknowledges
+# you've inspected the plan. Use this as the "I've read it, show me again"
+# step before adding --execute:
+forecastin-harness pr merge `
+  --config configs/forecastin.example.yaml `
+  --pr 2788 --head-sha 8f91dcf3 --apply
+
+# Actually merge — all three flags required:
 forecastin-harness pr merge `
   --config configs/forecastin.example.yaml `
   --pr 2788 --head-sha 8f91dcf3 `
-  --operator-confirmed --execute
+  --apply --execute --operator-confirmed
 ```
 
 Refusal paths the harness enforces:
 * missing `merge_ready.json` → exit 2 with explanation
-* recorded SHA ≠ supplied SHA → exit 2 with both SHAs
+* recorded SHA != supplied SHA → exit 2 with both SHAs
 * recorded verdict not in {`merge_ready`, `approved`} → exit 2
-* `--execute` without `--operator-confirmed` → exit 2
-* `gh` not on PATH and `--execute` requested → exit 2
+* `--apply --execute` without `--operator-confirmed` → exit 2
+* `gh` not on PATH and `--apply --execute` requested → exit 2
 
 The rendered `gh pr merge` command always includes
 `--repo <target.repo>`. This makes the merge target explicit and prevents
@@ -200,12 +221,12 @@ After merge:
 ```powershell
 forecastin-harness lanes retire `
   --config configs/forecastin.example.yaml `
-  --name for-235-settings `
-  --dry-run
+  --name for-235-settings
 # then for real
 forecastin-harness lanes retire `
   --config configs/forecastin.example.yaml `
-  --name for-235-settings
+  --name for-235-settings `
+  --apply
 ```
 
 Retirement only updates state. Worktree removal on disk is a deliberate

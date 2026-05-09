@@ -70,27 +70,39 @@ This is the concrete day-1 workflow against `Oscillate-JP/Forecastin`. It assume
 the operator has the Forecastin clone at `J:/Forcastin` and the harness clone
 at `J:/forecastin-harness`.
 
+> **v0.3 fail-closed default.** v0.3 inverts the old `--dry-run` flag:
+> every state-changing command is plan-only by default; pass `--apply` to
+> apply. A mistyped command without `--apply` will never mutate state or
+> contact GitHub. Read each plan first, then re-run with `--apply`.
+
 ```powershell
 # 1. Initialise the harness state directory inside the target repo.
+#    --target-repo MUST equal config.target.path after path normalisation.
 forecastin-harness init --target-repo J:/Forcastin --config configs/forecastin.example.yaml
 
 # 2. Inspect existing lanes.
 forecastin-harness lanes list
 
-# 3. Plan a new lane (dry-run prints exact git commands; nothing is created).
-forecastin-harness lanes create --name for-235-settings --task FOR-235 --scope "fix settings/groups 500" --dry-run
+# 3. Plan a new lane (default is plan-only; prints exact git commands).
+forecastin-harness lanes create --name for-235-settings --task FOR-235 --scope "fix settings/groups 500"
+# When the plan looks right, re-run with --apply to actually create it:
+forecastin-harness lanes create --name for-235-settings --task FOR-235 --scope "fix settings/groups 500" --apply
 
 # 4. Render an agent prompt for that lane's task packet.
 forecastin-harness task render --task-file templates/task_packet.yaml --agent claude
 
-# 5. Plan a long gate run (dry-run prints the planned command; no process starts).
-forecastin-harness gate start --name backend-pytest --command "bash scripts/ci.sh" --dry-run
+# 5. Plan a long gate run (default is plan-only; no process starts).
+forecastin-harness gate start --name backend-pytest --command "bash scripts/ci.sh"
+# When the planned command looks right, add --apply to spawn it:
+forecastin-harness gate start --name backend-pytest --command "bash scripts/ci.sh" --apply
 
-# 6. Once a PR exists, dry-run the PR gate so the operator sees what it will check.
-forecastin-harness pr check --pr 2788 --head-sha 8f91dcf3 --dry-run
+# 6. Once a PR exists, plan-only the PR gate so the operator sees what it will check.
+forecastin-harness pr check --pr 2788 --head-sha 8f91dcf3
+# Pass --apply to actually call 'gh' against GitHub:
+forecastin-harness pr check --pr 2788 --head-sha 8f91dcf3 --apply
 ```
 
-Drop `--dry-run` only after the planned commands have been reviewed.
+Add `--apply` only after the planned commands have been reviewed.
 
 For the deeper rationale, see [`docs/architecture.md`](docs/architecture.md) and
 [`docs/operator-workflow.md`](docs/operator-workflow.md).
@@ -135,8 +147,23 @@ Adds:
 * **Cross-platform command rendering** — `posix`, `powershell`, and
   `argv` modes; `--mode` flag on `gate start`.
 
-Every previously-shipping behaviour from v0.1 is preserved; dry-run is
-still the default for state-changing commands.
+Every previously-shipping behaviour from v0.1 is preserved.
+
+### v0.3 (current)
+
+* **Fail-closed CLI.** The legacy `--dry-run` flag is replaced by
+  `--apply`. Every state-changing command (`lanes create`, `lanes retire`,
+  `gate start`, `pr check`, `pr merge`) is **plan-only by default**;
+  the operator must explicitly pass `--apply` to mutate state or
+  contact GitHub. A mistyped command without `--apply` will never
+  modify a worktree, spawn a gate, or call `gh`.
+* **`pr merge` requires three flags to execute.** `--apply --execute
+  --operator-confirmed` are now all required to actually run
+  `gh pr merge`. Any subset prints the rendered command and stops.
+* **`init` rejects target-repo / config mismatch.** `forecastin-harness
+  init --target-repo X --config Y` now exits 2 if `X` (after
+  normalisation) does not equal `config.target.path` (also normalised).
+  Both paths are printed so the operator can fix the mismatch.
 
 ### v0.1
 
