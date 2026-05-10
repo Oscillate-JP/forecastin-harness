@@ -20,10 +20,11 @@ Design
   suggests ``taskkill`` / ``kill`` commands but never runs them. The
   operator decides; the harness logs.
 * The watchdog distinguishes two failure modes:
-  1. ``orphan_pytest`` — a pytest process running for ≥ threshold and
-     using ≥ memory_mb_threshold of memory.
-  2. ``no_output_hang`` — a pre-push hook is alive, no new bytes have
-     been written to its stdout for ≥ threshold seconds.
+  1. ``orphan_pytest`` — a pytest process running for ≥
+     ``age_threshold_seconds``. Memory is not consulted because
+     ``ProcessRow`` does not carry it; the threshold is age-only.
+  2. ``no_output_hang`` — a pre-push hook is alive but no new bytes
+     have been written to its stdout for ≥ ``output_silence_seconds``.
 """
 
 from __future__ import annotations
@@ -35,11 +36,6 @@ from .controller import ProcessRow
 
 #: Default age threshold above which a pytest process is suspect.
 DEFAULT_AGE_THRESHOLD_SECONDS: int = 300
-
-#: Default memory threshold above which a pytest process is suspect.
-#: Set to 500 MiB; legitimate pytest passes generally peak below this
-#: on small target paths.
-DEFAULT_MEMORY_MB_THRESHOLD: int = 500
 
 #: Default output-silence threshold for a no-output-hang. 90 seconds is
 #: long enough that legitimate slow tests aren't false-positives but
@@ -66,7 +62,6 @@ class WatchdogReport:
 
     flagged: tuple[HungProcess, ...]
     age_threshold_seconds: int
-    memory_mb_threshold: int
     output_silence_seconds: int
     notes: tuple[str, ...] = field(default_factory=tuple)
 
@@ -94,7 +89,6 @@ def evaluate_processes(
     processes: Iterable[ProcessRow],
     *,
     age_threshold_seconds: int = DEFAULT_AGE_THRESHOLD_SECONDS,
-    memory_mb_threshold: int = DEFAULT_MEMORY_MB_THRESHOLD,
     output_ages: Sequence[OutputAge] = (),
     output_silence_seconds: int = DEFAULT_OUTPUT_SILENCE_SECONDS,
 ) -> WatchdogReport:
@@ -102,9 +96,10 @@ def evaluate_processes(
 
     A process is flagged ``orphan_pytest`` when its name or cmdline
     matches pytest patterns AND its runtime is at-or-above
-    ``age_threshold_seconds``. ``ProcessRow`` does not carry memory in
-    this version — tests pass ``memory_mb=None`` and the watchdog
-    folds that into the rationale string only.
+    ``age_threshold_seconds``. ``ProcessRow`` does not carry memory
+    in this version, so the watchdog does not enforce a memory
+    threshold; the field was removed to keep the API and the
+    docstring honest.
 
     A process is flagged ``no_output_hang`` when:
 
@@ -147,7 +142,6 @@ def evaluate_processes(
     return WatchdogReport(
         flagged=tuple(flagged),
         age_threshold_seconds=age_threshold_seconds,
-        memory_mb_threshold=memory_mb_threshold,
         output_silence_seconds=output_silence_seconds,
     )
 

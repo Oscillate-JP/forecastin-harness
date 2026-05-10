@@ -84,3 +84,14 @@ def test_pytest_below_threshold_not_flagged_even_with_output_age() -> None:
     ]
     report = evaluate_processes(rows)
     assert report.ok is True
+
+
+def test_watchdog_report_no_longer_carries_memory_threshold() -> None:
+    """Regression: prior version exposed an unused ``memory_mb_threshold``
+    field that promised behaviour the implementation never provided."""
+    report = evaluate_processes([])
+    assert not hasattr(report, "memory_mb_threshold"), (
+        "WatchdogReport.memory_mb_threshold was removed because "
+        "ProcessRow does not carry memory; the field misled operators "
+        "into believing memory was being checked."
+    )

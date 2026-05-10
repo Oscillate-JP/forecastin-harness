@@ -335,6 +335,18 @@ def build_parser() -> argparse.ArgumentParser:
         default=DEFAULT_OUTPUT_SILENCE_SECONDS,
         help=f"Default: {DEFAULT_OUTPUT_SILENCE_SECONDS}s.",
     )
+    p_pre_watch.add_argument(
+        "--output-age",
+        action="append",
+        default=None,
+        metavar="PID:AGE_SECONDS:BYTES",
+        help=(
+            "Per-PID output-age sample for no_output_hang detection. "
+            "Repeat for multiple. Example: --output-age 4242:300:0 means "
+            "PID 4242 has been silent for 300 s and produced 0 bytes. "
+            "Without any --output-age, only orphan_pytest is flagged."
+        ),
+    )
     p_pre_watch.set_defaults(func=cmd_preflight_watchdog)
 
     p_pre_merge = p_pre_sub.add_parser(
@@ -782,13 +794,28 @@ def cmd_preflight_root(args: argparse.Namespace) -> int:
 def cmd_preflight_runtime(args: argparse.Namespace) -> int:
     """Verify Docker bind mounts come from the coordinator root."""
     if args.inspect_json:
-        raw = Path(args.inspect_json).read_text(encoding="utf-8")
+        try:
+            raw = Path(args.inspect_json).read_text(encoding="utf-8")
+        except OSError as exc:
+            print(f"preflight runtime: cannot read --inspect-json: {exc}", file=sys.stderr)
+            return 2
     else:
         raw = sys.stdin.read()
     if not raw.strip():
         print("preflight runtime: no JSON provided on --inspect-json or stdin", file=sys.stderr)
         return 2
-    mounts = load_mounts_from_docker_inspect(raw)
+    try:
+        mounts = load_mounts_from_docker_inspect(raw)
+    except json.JSONDecodeError as exc:
+        print(
+            f"preflight runtime: invalid docker inspect JSON: {exc.msg} "
+            f"(line {exc.lineno}, col {exc.colno})",
+            file=sys.stderr,
+        )
+        return 2
+    except (TypeError, ValueError) as exc:
+        print(f"preflight runtime: invalid docker inspect payload: {exc}", file=sys.stderr)
+        return 2
     allowed = [Path(p) for p in (args.allowed_root or [str(DEFAULT_EXPECTED_ROOT)])]
     forbidden_extra = [Path(p) for p in (args.forbidden_root or [])]
     forbidden = list(DEFAULT_FORBIDDEN_ROOTS) + forbidden_extra
@@ -819,10 +846,29 @@ def cmd_preflight_lane_policy(args: argparse.Namespace) -> int:
 
 def cmd_preflight_watchdog(args: argparse.Namespace) -> int:
     """Detect hung pre-push pytest / no-output processes."""
+    from .push_watchdog import OutputAge
     rows = enumerate_processes()
+    output_ages: list[OutputAge] = []
+    for raw in args.output_age or []:
+        parts = raw.split(":")
+        if len(parts) != 3:
+            print(
+                f"--output-age expects PID:AGE_SECONDS:BYTES, got {raw!r}",
+                file=sys.stderr,
+            )
+            return 2
+        try:
+            pid = int(parts[0])
+            age = int(parts[1])
+            bytes_seen = int(parts[2])
+        except ValueError as exc:
+            print(f"--output-age components must be integers: {exc}", file=sys.stderr)
+            return 2
+        output_ages.append(OutputAge(pid=pid, last_byte_age_seconds=age, bytes_seen=bytes_seen))
     report = evaluate_processes_for_watchdog(
         rows,
         age_threshold_seconds=args.age_threshold_seconds,
+        output_ages=tuple(output_ages),
         output_silence_seconds=args.silence_threshold_seconds,
     )
     print(render_watchdog_report(report))
@@ -874,17 +920,62 @@ def cmd_preflight_merge_evidence(args: argparse.Namespace) -> int:
 
 
 def cmd_task_generate(args: argparse.Namespace) -> int:
-    """Generate a starter task packet for a known drain shape."""
+    """Generate a starter task packet for a known drain shape.
+
+    ``--option`` values are parsed as strings on the CLI but several
+    generators expect non-string types (lists, ints). This command
+    coerces values for known typed parameters before calling the
+    generator so a packet is never silently malformed by string-only
+    inputs (e.g. ``child_linear_ids=FOR-1`` was previously iterated
+    character-by-character).
+    """
     import yaml
 
     fn = GENERATORS[args.kind]
-    extra: dict[str, str] = {}
+    # Per-generator typed-parameter map. Anything not listed is passed
+    # through as a string. This is conservative: adding a new typed
+    # parameter to a generator requires an explicit entry here.
+    typed_params: dict[str, dict[str, str]] = {
+        "open-pr-drain": {
+            "max_runtime_minutes": "int",
+        },
+        "docs-only-spec-batch": {
+            "child_linear_ids": "list[str]",
+            "max_runtime_minutes": "int",
+        },
+        "runtime-bugfix": {
+            "max_runtime_minutes": "int",
+        },
+        "linear-closeout": {
+            "expect_children_done": "int",
+            "max_runtime_minutes": "int",
+        },
+    }
+    expected_types = typed_params.get(args.kind, {})
+
+    extra: dict[str, object] = {}
     for kv in args.option or []:
         if "=" not in kv:
             print(f"--option must be key=value, got {kv!r}", file=sys.stderr)
             return 2
         k, v = kv.split("=", 1)
-        extra[k.strip()] = v.strip()
+        key = k.strip()
+        raw = v.strip()
+        coerce_to = expected_types.get(key)
+        try:
+            if coerce_to == "int":
+                extra[key] = int(raw)
+            elif coerce_to == "list[str]":
+                # Comma-separated. Empty entries dropped.
+                extra[key] = [item.strip() for item in raw.split(",") if item.strip()]
+            else:
+                extra[key] = raw
+        except ValueError as exc:
+            print(
+                f"--option {key}={raw!r}: cannot coerce to {coerce_to}: {exc}",
+                file=sys.stderr,
+            )
+            return 2
     try:
         packet = fn(target_repo=args.target_repo, worktree=args.worktree, **extra)
     except TypeError as exc:

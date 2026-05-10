@@ -74,6 +74,28 @@ def test_linear_closeout_packet_passes_validator() -> None:
     assert report.ok, [f.code for f in report.errors]
 
 
+def test_linear_closeout_official_gate_includes_repo() -> None:
+    """Regression: ``preflight merge-evidence`` requires --repo. The
+    generated official_gate_command must include it so the packet's
+    own gate is runnable."""
+    packet = generate_linear_closeout(
+        target_repo="t", worktree="w",
+        parent_linear_id="FOR-213", expect_children_done=23,
+    )
+    cmd = packet["official_gate_command"]
+    assert "--repo" in cmd, cmd
+    assert "preflight merge-evidence" in cmd, cmd
+
+
+def test_linear_closeout_pr_owner_repo_overridable() -> None:
+    packet = generate_linear_closeout(
+        target_repo="t", worktree="w",
+        parent_linear_id="FOR-1", expect_children_done=1,
+        pr_owner_repo="MyOrg/MyRepo",
+    )
+    assert "MyOrg/MyRepo" in packet["official_gate_command"]
+
+
 def test_all_packets_carry_drain_loop_semantics() -> None:
     """Stop conditions must be present so the agent never treats a
     lane report as a stopping point unless the rule says so."""

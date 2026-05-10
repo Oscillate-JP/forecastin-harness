@@ -30,9 +30,11 @@ Gate kinds
 * ``test-only`` — only paths under ``backend/tests/`` or
   ``frontend/src/__tests__/`` etc. Gate: targeted pytest / vitest on
   the test files themselves.
-* ``backend-code`` — any path under ``backend/app/``,
-  ``backend/scripts/``, ``backend/migrations/`` (non-migration). Gate:
-  targeted backend pytest + ruff + mypy.
+* ``backend-code`` — any path under ``backend/app/`` (non-runtime
+  subtree) or ``backend/scripts/``. Note: ``backend/alembic/versions/``
+  and ``backend/migrations/`` classify as ``migration``, not
+  ``backend-code``, because their gates differ. Gate: targeted backend
+  pytest + ruff + mypy.
 * ``frontend-code`` — paths under ``frontend/src/`` other than
   ``frontend/src/__tests__/``. Gate: targeted vitest + eslint +
   type-check.

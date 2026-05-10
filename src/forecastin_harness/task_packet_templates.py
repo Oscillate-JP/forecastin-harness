@@ -220,9 +220,16 @@ def generate_linear_closeout(
     worktree: str,
     parent_linear_id: str,
     expect_children_done: int,
+    pr_owner_repo: str = "Oscillate-JP/Forecastin",
     max_runtime_minutes: int = 30,
 ) -> dict[str, Any]:
-    """Packet for "close out a Linear parent whose children are all Done"."""
+    """Packet for "close out a Linear parent whose children are all Done".
+
+    ``pr_owner_repo`` is required for the generated official_gate_command
+    because ``preflight merge-evidence`` itself requires ``--repo``.
+    Defaulted to the canonical Forecastin repo so single-arg callers still
+    produce a runnable packet.
+    """
     return {
         "mission": (
             f"Close out {parent_linear_id} after verifying all "
@@ -242,7 +249,8 @@ def generate_linear_closeout(
         "merge_authority": "human-only",
         "no_bypass_permissions": True,
         "official_gate_command": (
-            "forecastin-harness preflight merge-evidence --pr <ATTACHED_PR>"
+            f"forecastin-harness preflight merge-evidence --pr <ATTACHED_PR> "
+            f"--repo {pr_owner_repo}"
         ),
         "max_runtime_minutes": max_runtime_minutes,
         "main_branch": "main",
