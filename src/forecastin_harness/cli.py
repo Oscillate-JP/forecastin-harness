@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import subprocess
 import sys
 from pathlib import Path
 from typing import Sequence
@@ -29,6 +30,25 @@ from .controller import (
     render_validation_report,
     validate_packet_file,
 )
+from .lane_classifier import classify_changes, render_classification
+from .merge_evidence import (
+    render_merge_evidence,
+    verify_merge_payload,
+    verify_reachable_from_main,
+)
+from .push_watchdog import (
+    DEFAULT_AGE_THRESHOLD_SECONDS,
+    DEFAULT_OUTPUT_SILENCE_SECONDS,
+    evaluate_processes as evaluate_processes_for_watchdog,
+    render_watchdog_report,
+)
+from .root_guard import DEFAULT_EXPECTED_ROOT, DEFAULT_FORBIDDEN_ROOTS, check_root
+from .runtime_provenance import (
+    evaluate_mounts,
+    load_mounts_from_docker_inspect,
+    render_provenance_report,
+)
+from .task_packet_templates import GENERATORS
 from .gate_supervisor import DEFAULT_DEADLINE_SECONDS, stop as gate_stop, summarise as gate_summarise, supervise
 from .gates import initialise as gate_initialise
 from .gates import plan_gate, read_state, tail_text
@@ -219,6 +239,185 @@ def build_parser() -> argparse.ArgumentParser:
         help="Optional adapter YAML; needed to compare cwd against target.path.",
     )
     p_ctrl_doctor.set_defaults(func=cmd_controller_doctor)
+
+    # preflight (root, runtime provenance, lane policy, watchdog, merge evidence)
+    p_pre = sub.add_parser(
+        "preflight",
+        help="Pre-action safety checks (root, runtime, lane-policy, watchdog, merge-evidence).",
+    )
+    p_pre_sub = p_pre.add_subparsers(dest="preflight_cmd", required=True)
+
+    p_pre_root = p_pre_sub.add_parser(
+        "root",
+        help="Refuse to proceed if cwd is not the expected coordinator root.",
+    )
+    p_pre_root.add_argument(
+        "--expected",
+        default=str(DEFAULT_EXPECTED_ROOT),
+        help=f"Expected coordinator root. Default: {DEFAULT_EXPECTED_ROOT}",
+    )
+    p_pre_root.add_argument(
+        "--forbidden",
+        action="append",
+        default=None,
+        help=(
+            "Additional forbidden root. Repeat for multiple. "
+            f"Always-forbidden defaults: {[str(p) for p in DEFAULT_FORBIDDEN_ROOTS]}"
+        ),
+    )
+    p_pre_root.set_defaults(func=cmd_preflight_root)
+
+    p_pre_runtime = p_pre_sub.add_parser(
+        "runtime",
+        help="Verify Docker bind mounts originate from the coordinator root.",
+    )
+    p_pre_runtime.add_argument(
+        "--inspect-json",
+        default=None,
+        help=(
+            "Path to a JSON file containing the output of `docker inspect <id>...`. "
+            "When omitted, the CLI reads JSON from stdin."
+        ),
+    )
+    p_pre_runtime.add_argument(
+        "--allowed-root",
+        action="append",
+        default=None,
+        help=(
+            "Allowed bind-source root. Repeat for multiple. "
+            f"Default: {DEFAULT_EXPECTED_ROOT}"
+        ),
+    )
+    p_pre_runtime.add_argument(
+        "--forbidden-root",
+        action="append",
+        default=None,
+        help=(
+            "Forbidden bind-source root. Repeat for multiple. "
+            f"Always-forbidden defaults: {[str(p) for p in DEFAULT_FORBIDDEN_ROOTS]}"
+        ),
+    )
+    p_pre_runtime.add_argument(
+        "--service",
+        action="append",
+        default=None,
+        help="Required service to verify. Repeat for multiple. Default: backend, frontend.",
+    )
+    p_pre_runtime.set_defaults(func=cmd_preflight_runtime)
+
+    p_pre_lane = p_pre_sub.add_parser(
+        "lane-policy",
+        help="Classify a changed-files list into a gate kind.",
+    )
+    p_pre_lane.add_argument(
+        "--files",
+        default=None,
+        help=(
+            "Path to a newline-delimited file listing changed paths. "
+            "When omitted, reads from stdin (one path per line)."
+        ),
+    )
+    p_pre_lane.set_defaults(func=cmd_preflight_lane_policy)
+
+    p_pre_watch = p_pre_sub.add_parser(
+        "watchdog",
+        help="Detect hung pre-push pytest / no-output processes.",
+    )
+    p_pre_watch.add_argument(
+        "--age-threshold-seconds",
+        type=int,
+        default=DEFAULT_AGE_THRESHOLD_SECONDS,
+        help=f"Default: {DEFAULT_AGE_THRESHOLD_SECONDS}s.",
+    )
+    p_pre_watch.add_argument(
+        "--silence-threshold-seconds",
+        type=int,
+        default=DEFAULT_OUTPUT_SILENCE_SECONDS,
+        help=f"Default: {DEFAULT_OUTPUT_SILENCE_SECONDS}s.",
+    )
+    p_pre_watch.add_argument(
+        "--output-age",
+        action="append",
+        default=None,
+        metavar="PID:AGE_SECONDS:BYTES",
+        help=(
+            "Per-PID output-age sample for no_output_hang detection. "
+            "Repeat for multiple. Example: --output-age 4242:300:0 means "
+            "PID 4242 has been silent for 300 s and produced 0 bytes. "
+            "Without any --output-age, only orphan_pytest is flagged."
+        ),
+    )
+    p_pre_watch.set_defaults(func=cmd_preflight_watchdog)
+
+    p_pre_merge = p_pre_sub.add_parser(
+        "merge-evidence",
+        help=(
+            "Verify a PR's merge using gh pr view JSON. Refuses banner text. "
+            "Optionally verifies reachability from origin/main."
+        ),
+    )
+    p_pre_merge.add_argument(
+        "--pr",
+        type=int,
+        required=True,
+        help="PR number to verify.",
+    )
+    p_pre_merge.add_argument(
+        "--repo",
+        required=True,
+        help="GitHub <owner>/<repo>, e.g. Oscillate-JP/Forecastin",
+    )
+    p_pre_merge.add_argument(
+        "--check-reachability",
+        default=None,
+        help=(
+            "Optional path to the local git checkout. When set, also runs "
+            "`git merge-base --is-ancestor <merge_commit> origin/main`."
+        ),
+    )
+    p_pre_merge.add_argument(
+        "--main-ref",
+        default="origin/main",
+        help="Default: origin/main",
+    )
+    p_pre_merge.set_defaults(func=cmd_preflight_merge_evidence)
+
+    # task generate (templates)
+    p_task_gen = p_task_sub.add_parser(
+        "generate",
+        help="Generate a starter task packet for a known drain shape.",
+    )
+    p_task_gen.add_argument(
+        "--kind",
+        required=True,
+        choices=sorted(GENERATORS.keys()),
+        help="Drain shape to generate.",
+    )
+    p_task_gen.add_argument(
+        "--target-repo",
+        required=True,
+        help="Path to target repo working copy (becomes packet.target_repo).",
+    )
+    p_task_gen.add_argument(
+        "--worktree",
+        required=True,
+        help="Path to lane worktree (becomes packet.worktree).",
+    )
+    p_task_gen.add_argument(
+        "--out",
+        default=None,
+        help="Output path for generated YAML. When omitted, writes to stdout.",
+    )
+    p_task_gen.add_argument(
+        "--option",
+        action="append",
+        default=None,
+        help=(
+            "Extra generator option as key=value. Repeat for multiple. "
+            "See task_packet_templates docstring for the per-kind option set."
+        ),
+    )
+    p_task_gen.set_defaults(func=cmd_task_generate)
 
     return parser
 
@@ -577,6 +776,218 @@ def _config_and_store(config_path: str) -> tuple[HarnessConfig, StateStore]:
     store = StateStore(config.state_path)
     store.ensure_layout()
     return config, store
+
+
+# ---------------- preflight commands ----------------
+
+
+def cmd_preflight_root(args: argparse.Namespace) -> int:
+    """Refuse to proceed if cwd is not the expected coordinator root."""
+    expected = Path(args.expected)
+    forbidden_extra = [Path(p) for p in (args.forbidden or [])]
+    forbidden = list(DEFAULT_FORBIDDEN_ROOTS) + forbidden_extra
+    result = check_root(Path.cwd(), expected=expected, forbidden=forbidden)
+    print(result.message)
+    return 0 if result.ok else 2
+
+
+def cmd_preflight_runtime(args: argparse.Namespace) -> int:
+    """Verify Docker bind mounts come from the coordinator root."""
+    if args.inspect_json:
+        try:
+            raw = Path(args.inspect_json).read_text(encoding="utf-8")
+        except OSError as exc:
+            print(f"preflight runtime: cannot read --inspect-json: {exc}", file=sys.stderr)
+            return 2
+    else:
+        raw = sys.stdin.read()
+    if not raw.strip():
+        print("preflight runtime: no JSON provided on --inspect-json or stdin", file=sys.stderr)
+        return 2
+    try:
+        mounts = load_mounts_from_docker_inspect(raw)
+    except json.JSONDecodeError as exc:
+        print(
+            f"preflight runtime: invalid docker inspect JSON: {exc.msg} "
+            f"(line {exc.lineno}, col {exc.colno})",
+            file=sys.stderr,
+        )
+        return 2
+    except (TypeError, ValueError) as exc:
+        print(f"preflight runtime: invalid docker inspect payload: {exc}", file=sys.stderr)
+        return 2
+    allowed = [Path(p) for p in (args.allowed_root or [str(DEFAULT_EXPECTED_ROOT)])]
+    forbidden_extra = [Path(p) for p in (args.forbidden_root or [])]
+    forbidden = list(DEFAULT_FORBIDDEN_ROOTS) + forbidden_extra
+    services = tuple(args.service or ("backend", "frontend"))
+    report = evaluate_mounts(
+        mounts,
+        allowed_roots=allowed,
+        forbidden_roots=forbidden,
+        required_services=services,
+    )
+    print(render_provenance_report(report))
+    return 0 if report.runtime_evidence_valid else 2
+
+
+def cmd_preflight_lane_policy(args: argparse.Namespace) -> int:
+    """Classify a changed-files list into a gate kind."""
+    if args.files:
+        raw = Path(args.files).read_text(encoding="utf-8")
+    else:
+        raw = sys.stdin.read()
+    paths = [line.strip() for line in raw.splitlines() if line.strip()]
+    report = classify_changes(paths)
+    print(render_classification(report))
+    if report.kind == "empty":
+        return 2
+    return 0
+
+
+def cmd_preflight_watchdog(args: argparse.Namespace) -> int:
+    """Detect hung pre-push pytest / no-output processes."""
+    from .push_watchdog import OutputAge
+    rows = enumerate_processes()
+    output_ages: list[OutputAge] = []
+    for raw in args.output_age or []:
+        parts = raw.split(":")
+        if len(parts) != 3:
+            print(
+                f"--output-age expects PID:AGE_SECONDS:BYTES, got {raw!r}",
+                file=sys.stderr,
+            )
+            return 2
+        try:
+            pid = int(parts[0])
+            age = int(parts[1])
+            bytes_seen = int(parts[2])
+        except ValueError as exc:
+            print(f"--output-age components must be integers: {exc}", file=sys.stderr)
+            return 2
+        output_ages.append(OutputAge(pid=pid, last_byte_age_seconds=age, bytes_seen=bytes_seen))
+    report = evaluate_processes_for_watchdog(
+        rows,
+        age_threshold_seconds=args.age_threshold_seconds,
+        output_ages=tuple(output_ages),
+        output_silence_seconds=args.silence_threshold_seconds,
+    )
+    print(render_watchdog_report(report))
+    return 0 if report.ok else 2
+
+
+def cmd_preflight_merge_evidence(args: argparse.Namespace) -> int:
+    """Verify a PR's merge using gh pr view JSON. Refuse banner text."""
+    try:
+        out = subprocess.run(
+            [
+                "gh",
+                "pr",
+                "view",
+                str(args.pr),
+                "--repo",
+                args.repo,
+                "--json",
+                "number,state,mergedAt,mergeCommit,url",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+    except (subprocess.SubprocessError, FileNotFoundError, OSError) as exc:
+        print(f"preflight merge-evidence: gh invocation failed: {exc}", file=sys.stderr)
+        return 2
+    if out.returncode != 0:
+        print(out.stderr, file=sys.stderr)
+        return 2
+    evidence = verify_merge_payload(out.stdout, expected_pr=args.pr)
+    reachable: bool | None = None
+    if args.check_reachability and evidence.merge_commit_sha:
+        reachable = verify_reachable_from_main(
+            Path(args.check_reachability),
+            evidence.merge_commit_sha,
+            main_ref=args.main_ref,
+        )
+    print(render_merge_evidence(evidence, reachable_from_main=reachable))
+    if not evidence.ok:
+        return 2
+    if reachable is False:
+        return 2
+    return 0
+
+
+# ---------------- task generate ----------------
+
+
+def cmd_task_generate(args: argparse.Namespace) -> int:
+    """Generate a starter task packet for a known drain shape.
+
+    ``--option`` values are parsed as strings on the CLI but several
+    generators expect non-string types (lists, ints). This command
+    coerces values for known typed parameters before calling the
+    generator so a packet is never silently malformed by string-only
+    inputs (e.g. ``child_linear_ids=FOR-1`` was previously iterated
+    character-by-character).
+    """
+    import yaml
+
+    fn = GENERATORS[args.kind]
+    # Per-generator typed-parameter map. Anything not listed is passed
+    # through as a string. This is conservative: adding a new typed
+    # parameter to a generator requires an explicit entry here.
+    typed_params: dict[str, dict[str, str]] = {
+        "open-pr-drain": {
+            "max_runtime_minutes": "int",
+        },
+        "docs-only-spec-batch": {
+            "child_linear_ids": "list[str]",
+            "max_runtime_minutes": "int",
+        },
+        "runtime-bugfix": {
+            "max_runtime_minutes": "int",
+        },
+        "linear-closeout": {
+            "expect_children_done": "int",
+            "max_runtime_minutes": "int",
+        },
+    }
+    expected_types = typed_params.get(args.kind, {})
+
+    extra: dict[str, object] = {}
+    for kv in args.option or []:
+        if "=" not in kv:
+            print(f"--option must be key=value, got {kv!r}", file=sys.stderr)
+            return 2
+        k, v = kv.split("=", 1)
+        key = k.strip()
+        raw = v.strip()
+        coerce_to = expected_types.get(key)
+        try:
+            if coerce_to == "int":
+                extra[key] = int(raw)
+            elif coerce_to == "list[str]":
+                # Comma-separated. Empty entries dropped.
+                extra[key] = [item.strip() for item in raw.split(",") if item.strip()]
+            else:
+                extra[key] = raw
+        except ValueError as exc:
+            print(
+                f"--option {key}={raw!r}: cannot coerce to {coerce_to}: {exc}",
+                file=sys.stderr,
+            )
+            return 2
+    try:
+        packet = fn(target_repo=args.target_repo, worktree=args.worktree, **extra)
+    except TypeError as exc:
+        print(f"missing required option(s) for kind {args.kind!r}: {exc}", file=sys.stderr)
+        return 2
+    rendered = yaml.safe_dump(packet, sort_keys=False, default_flow_style=False)
+    if args.out:
+        Path(args.out).write_text(rendered, encoding="utf-8")
+        print(f"wrote {args.out}")
+    else:
+        sys.stdout.write(rendered)
+    return 0
 
 
 def main(argv: Sequence[str] | None = None) -> int:
