@@ -118,6 +118,32 @@ def test_run_pr_check_omits_repo_when_unset_for_back_compat(tmp_path: Path) -> N
     assert "--repo" not in argv
 
 
+# --- Windows UTF-8 decode regression ---------------------------------------
+
+
+def test_run_pr_check_decodes_gh_output_as_utf8(tmp_path: Path) -> None:
+    """gh output must be decoded as UTF-8, not the platform default codec.
+
+    Regression: on Windows ``text=True`` alone decodes with cp1252, which
+    raises UnicodeDecodeError on the emoji / em-dash bytes that routinely
+    appear in PR bodies and CodeRabbit comments (e.g. "🎉", "→"). The reader
+    thread then dies, ``proc.stdout`` becomes None, and the gate fails with an
+    opaque ``TypeError`` at ``json.loads`` instead of evaluating the PR. The
+    runner must be invoked with ``encoding="utf-8"`` and ``errors="replace"``.
+    """
+    runner = _runner_returning(_good_payload(body="ship it 🎉 — done"))
+    run_pr_check(
+        _store(tmp_path),
+        pr_number=1,
+        head_sha="deadbeef",
+        runner=runner,
+        which=_which_gh,
+    )
+    kwargs = runner.captured["kwargs"]  # type: ignore[attr-defined]
+    assert kwargs.get("encoding") == "utf-8"
+    assert kwargs.get("errors") == "replace"
+
+
 # --- required-checks fail-closed -------------------------------------------
 
 
@@ -333,3 +359,48 @@ def test_run_pr_check_emits_merge_ready_with_extra_fields(tmp_path: Path) -> Non
     # Sanity: the planner-required fields are still present.
     assert record["verdict"] == "merge_ready"
     assert record["head_sha"] == "deadbeef"
+
+
+# --- legacy StatusContext (state-only) checks ------------------------------
+
+
+def test_run_pr_check_accepts_statuscontext_success_via_state(tmp_path: Path) -> None:
+    """Legacy StatusContext checks expose their result via ``state``.
+
+    CodeRabbit and many external CIs post commit statuses (StatusContext)
+    with ``state=SUCCESS`` and no ``conclusion``/``status``. The gate must
+    read ``state`` and treat SUCCESS as passing instead of failing closed on
+    a ``<empty>`` bucket. Regression for the "CodeRabbit=<empty> (unknown)"
+    false-negative observed on live PR #3214.
+    """
+    payload = _good_payload(
+        statusCheckRollup=[
+            {"name": "guard-canary", "conclusion": "SUCCESS", "status": "COMPLETED"},
+            {"context": "CodeRabbit", "state": "SUCCESS"},
+        ],
+    )
+    result = run_pr_check(
+        _store(tmp_path),
+        pr_number=1,
+        head_sha="deadbeef",
+        runner=_runner_returning(payload),
+        which=_which_gh,
+    )
+    checks = [o for o in result.outcomes if o.name == "required-checks"]
+    assert checks and checks[0].result == "pass", checks
+
+
+def test_run_pr_check_fails_on_statuscontext_error_state(tmp_path: Path) -> None:
+    """A StatusContext in ERROR (legacy failure) must fail required-checks."""
+    payload = _good_payload(
+        statusCheckRollup=[{"context": "ci", "state": "ERROR"}],
+    )
+    result = run_pr_check(
+        _store(tmp_path),
+        pr_number=1,
+        head_sha="deadbeef",
+        runner=_runner_returning(payload),
+        which=_which_gh,
+    )
+    checks = [o for o in result.outcomes if o.name == "required-checks"]
+    assert checks and checks[0].result == "fail"
