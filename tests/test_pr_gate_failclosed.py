@@ -118,6 +118,32 @@ def test_run_pr_check_omits_repo_when_unset_for_back_compat(tmp_path: Path) -> N
     assert "--repo" not in argv
 
 
+# --- Windows UTF-8 decode regression ---------------------------------------
+
+
+def test_run_pr_check_decodes_gh_output_as_utf8(tmp_path: Path) -> None:
+    """gh output must be decoded as UTF-8, not the platform default codec.
+
+    Regression: on Windows ``text=True`` alone decodes with cp1252, which
+    raises UnicodeDecodeError on the emoji / em-dash bytes that routinely
+    appear in PR bodies and CodeRabbit comments (e.g. "🎉", "→"). The reader
+    thread then dies, ``proc.stdout`` becomes None, and the gate fails with an
+    opaque ``TypeError`` at ``json.loads`` instead of evaluating the PR. The
+    runner must be invoked with ``encoding="utf-8"`` and ``errors="replace"``.
+    """
+    runner = _runner_returning(_good_payload(body="ship it 🎉 — done"))
+    run_pr_check(
+        _store(tmp_path),
+        pr_number=1,
+        head_sha="deadbeef",
+        runner=runner,
+        which=_which_gh,
+    )
+    kwargs = runner.captured["kwargs"]  # type: ignore[attr-defined]
+    assert kwargs.get("encoding") == "utf-8"
+    assert kwargs.get("errors") == "replace"
+
+
 # --- required-checks fail-closed -------------------------------------------
 
 

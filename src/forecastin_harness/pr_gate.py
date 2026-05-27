@@ -380,6 +380,16 @@ def run_pr_check(
             check=False,
             capture_output=True,
             text=True,
+            # Force UTF-8 decoding of gh's output. ``text=True`` alone uses the
+            # platform default codec (cp1252 on Windows), which raises
+            # UnicodeDecodeError on the emoji/em-dash bytes that routinely
+            # appear in PR bodies and CodeRabbit comments (e.g. "🎉", "→").
+            # When that happens the reader thread dies and ``proc.stdout`` is
+            # ``None``, surfacing as an opaque TypeError at ``json.loads``.
+            # ``errors="replace"`` keeps a stray undecodable byte from aborting
+            # the whole gate — the JSON fields we read are ASCII.
+            encoding="utf-8",
+            errors="replace",
         )
     except OSError as exc:
         result.outcomes.append(CheckOutcome("gh-invoke", "fail", f"failed to invoke gh: {exc}"))
