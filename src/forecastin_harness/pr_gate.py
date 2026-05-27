@@ -523,16 +523,18 @@ def run_pr_check(
 # safely tolerate them. Fail-closed.
 _CHECK_PASS_BUCKETS = frozenset({"SUCCESS"})
 
-# Explicitly bad terminal states. These always fail.
+# Explicitly bad terminal states. These always fail. ``ERROR`` is the
+# legacy StatusContext failure state (CheckRuns use ``FAILURE``).
 _CHECK_FAIL_BUCKETS = frozenset(
-    {"FAILURE", "CANCELLED", "TIMED_OUT", "ACTION_REQUIRED", "STALE", "STARTUP_FAILURE"}
+    {"FAILURE", "ERROR", "CANCELLED", "TIMED_OUT", "ACTION_REQUIRED", "STALE", "STARTUP_FAILURE"}
 )
 
 # Non-terminal states. The previous implementation treated these as PASS,
 # which is exactly the bug the audit caught: a PR with checks still
 # IN_PROGRESS could pass the gate. They now fail with detail "pending".
+# ``EXPECTED`` is the legacy StatusContext pending state.
 _CHECK_PENDING_BUCKETS = frozenset(
-    {"IN_PROGRESS", "QUEUED", "PENDING", "WAITING", "REQUESTED"}
+    {"IN_PROGRESS", "QUEUED", "PENDING", "WAITING", "REQUESTED", "EXPECTED"}
 )
 
 # Ambiguous in this projection — required-vs-optional is not knowable
@@ -548,10 +550,19 @@ def _bucket_for(check: dict[str, Any]) -> str:
     holds the lifecycle phase (``IN_PROGRESS`` etc.). Conclusion wins when
     present so a fast-failing check is reported as ``FAILURE`` rather than
     ``COMPLETED``.
+
+    The rollup mixes two node shapes. CheckRun nodes carry
+    ``conclusion``/``status``; legacy StatusContext nodes (commit statuses
+    posted by CodeRabbit and many external CIs) carry neither — only
+    ``state`` (SUCCESS / FAILURE / ERROR / PENDING / EXPECTED). Without the
+    ``state`` fallback every status-based check reads as ``<empty>`` and the
+    gate fails closed on it even when the status is green.
     """
     raw = check.get("conclusion")
     if not raw:
         raw = check.get("status")
+    if not raw:
+        raw = check.get("state")
     return str(raw or "").upper()
 
 

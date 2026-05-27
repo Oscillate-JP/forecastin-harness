@@ -359,3 +359,48 @@ def test_run_pr_check_emits_merge_ready_with_extra_fields(tmp_path: Path) -> Non
     # Sanity: the planner-required fields are still present.
     assert record["verdict"] == "merge_ready"
     assert record["head_sha"] == "deadbeef"
+
+
+# --- legacy StatusContext (state-only) checks ------------------------------
+
+
+def test_run_pr_check_accepts_statuscontext_success_via_state(tmp_path: Path) -> None:
+    """Legacy StatusContext checks expose their result via ``state``.
+
+    CodeRabbit and many external CIs post commit statuses (StatusContext)
+    with ``state=SUCCESS`` and no ``conclusion``/``status``. The gate must
+    read ``state`` and treat SUCCESS as passing instead of failing closed on
+    a ``<empty>`` bucket. Regression for the "CodeRabbit=<empty> (unknown)"
+    false-negative observed on live PR #3214.
+    """
+    payload = _good_payload(
+        statusCheckRollup=[
+            {"name": "guard-canary", "conclusion": "SUCCESS", "status": "COMPLETED"},
+            {"context": "CodeRabbit", "state": "SUCCESS"},
+        ],
+    )
+    result = run_pr_check(
+        _store(tmp_path),
+        pr_number=1,
+        head_sha="deadbeef",
+        runner=_runner_returning(payload),
+        which=_which_gh,
+    )
+    checks = [o for o in result.outcomes if o.name == "required-checks"]
+    assert checks and checks[0].result == "pass", checks
+
+
+def test_run_pr_check_fails_on_statuscontext_error_state(tmp_path: Path) -> None:
+    """A StatusContext in ERROR (legacy failure) must fail required-checks."""
+    payload = _good_payload(
+        statusCheckRollup=[{"context": "ci", "state": "ERROR"}],
+    )
+    result = run_pr_check(
+        _store(tmp_path),
+        pr_number=1,
+        head_sha="deadbeef",
+        runner=_runner_returning(payload),
+        which=_which_gh,
+    )
+    checks = [o for o in result.outcomes if o.name == "required-checks"]
+    assert checks and checks[0].result == "fail"
